@@ -503,6 +503,26 @@ def dga_asset_status(number: str):
     return jsonify(dga_status.asset_status(number, date_from, date_to))
 
 
+@app.post("/api/dga/status/manual")
+def dga_manual_status():
+    """Figure 2 status for hand-entered gas values.
+
+    For a unit whose lab results are not loaded yet, or a what-if check against
+    a test certificate. Returns the same payload as the stored-asset report, so
+    the frontend renders and exports it identically.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        payload = dga_status.manual_report(
+            body.get("samples") or [],
+            body.get("ageYears"),
+            body.get("label") or "",
+        )
+    except dga_status.ManualEntryError as exc:
+        return jsonify({"message": str(exc)}), 400
+    return jsonify(payload)
+
+
 @app.post("/api/dga/status/fleet")
 def dga_fleet_status():
     """Status for every asset in scope, worst first, with the fleet counts."""

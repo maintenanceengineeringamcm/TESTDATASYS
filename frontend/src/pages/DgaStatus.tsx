@@ -4,19 +4,21 @@ import {
   CalendarClock,
   CheckCircle2,
   ClipboardList,
+  Download,
   FileText,
   Layers,
   ShieldAlert,
   Table2,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, useApi } from '../api'
 import DgaAssetPicker from '../components/DgaAssetPicker'
-import DgaStatusReportView, { limitText } from '../components/DgaStatusReport'
+import DgaStatusReportView from '../components/DgaStatusReport'
 import ScopeBanner from '../components/ScopeBanner'
 import { useScope } from '../components/ScopeContext'
 import { EmptyState, ErrorNote, Loader, SectionHeader, StatCard } from '../components/ui'
+import { limitText, saveStatusCsv } from '../lib/dgaStatusCsv'
 import type {
   DgaAgeSource,
   DgaFleetStatusRow,
@@ -106,6 +108,8 @@ function DecisionFlow({ result }: { result: DgaStatusResult }) {
 
 function Assessment({ asset }: { asset: string }) {
   const [showReport, setShowReport] = useState(false)
+  const [pdfBusy, setPdfBusy] = useState(false)
+  const [pdfError, setPdfError] = useState<string | null>(null)
   const path = asset ? `/dga/status/${encodeURIComponent(asset)}` : null
   const status = useApi<DgaStatusResult>(path, [asset])
   const report = useApi<DgaStatusReport>(
@@ -117,37 +121,29 @@ function Assessment({ asset }: { asset: string }) {
   useEffect(() => setShowReport(false), [asset])
 
   function downloadCsv() {
-    const s = status.data
-    if (!s) return
-    const head = [
-      'Gas', 'Measured', 'Latest ppm', 'Latest date', 'Previous ppm', 'Previous date',
-      'Delta ppm', 'Rate ppm/yr', 'T1', 'T2', 'T3', 'T4',
-      'Above T1', 'Above T2', 'Delta over T3', 'Rate over T4', 'Note',
-    ]
-    const rows = s.gases.map((g) => [
-      g.gas, g.measured ? 'yes' : 'no', g.latest ?? '', g.latestDate ?? '',
-      g.previous ?? '', g.previousDate ?? '', g.delta ?? '',
-      g.rate === null ? '' : g.rate.toFixed(2),
-      g.t1 ?? '', g.t2 ?? '', limitText(g.t3), s.ratesAvailable ? limitText(g.t4) : '',
-      g.exceedsT1 ? 'yes' : 'no', g.exceedsT2 ? 'yes' : 'no',
-      g.exceedsT3 ? 'yes' : 'no', g.exceedsT4 ? 'yes' : 'no', g.note,
-    ])
-    const meta = [
-      ['Asset', s.asset], ['Status', s.statusLabel], ['Verdict', s.verdict],
-      ['O2/N2 section', s.ratioBand ?? ''], ['Age band', s.ageBand ?? ''],
-      ['Table 4 period', s.periodBand ?? 'not applied'],
-      ['Latest sample', s.latestSample ?? ''], ['Standard', s.standard], [],
-    ]
-    // Quote every field: gas notes and the standard's own text contain commas.
-    const csv = [...meta, head, ...rows]
-      .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
-      .join('\r\n')
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `dga-status-${asset.replace(/[^\w.-]+/g, '_')}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    if (status.data) saveStatusCsv(status.data)
+  }
+
+  // The PDF is built from the full report payload, which the summary view has
+  // not fetched. Pulling it on demand keeps the assessment screen light while
+  // still letting an engineer take the signed document in one click.
+  async function downloadPdf() {
+    if (!asset) return
+    setPdfBusy(true)
+    setPdfError(null)
+    try {
+      const [{ exportDgaStatusPdf }, full] = await Promise.all([
+        import('../lib/dgaStatusPdf'),
+        report.data
+          ? Promise.resolve(report.data)
+          : api.get<DgaStatusReport>(`/dga/status/report/${encodeURIComponent(asset)}`),
+      ])
+      exportDgaStatusPdf(full)
+    } catch (err) {
+      setPdfError(err instanceof Error ? err.message : 'Could not build the PDF.')
+    } finally {
+      setPdfBusy(false)
+    }
   }
 
   if (!asset) {
@@ -194,9 +190,17 @@ function Assessment({ asset }: { asset: string }) {
           <h2 className="text-sm font-bold text-ink">
             Status classification — IEEE C57.104-2019, Figure 2
           </h2>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center gap-2">
             <button className="btn-ghost !py-1.5 text-xs" onClick={downloadCsv}>
               <Table2 className="h-3.5 w-3.5" /> Evidence CSV
+            </button>
+            <button
+              className="btn-ghost !py-1.5 text-xs"
+              onClick={downloadPdf}
+              disabled={pdfBusy}
+            >
+              <Download className="h-3.5 w-3.5" />
+              {pdfBusy ? 'Building…' : 'Download PDF'}
             </button>
             <button className="btn-primary !py-1.5 text-xs" onClick={() => setShowReport(true)}>
               <FileText className="h-3.5 w-3.5" /> Full report
@@ -204,6 +208,9 @@ function Assessment({ asset }: { asset: string }) {
           </div>
         </div>
         <div className="card-pad">
+          {pdfError && (
+            <p className="mb-3 rounded-lg bg-red-50 p-2.5 text-xs text-red-700">{pdfError}</p>
+          )}
           <div className="flex flex-wrap items-start gap-6">
             <div
               className="rounded-xl px-6 py-4 text-center"
@@ -892,7 +899,11 @@ export default function DgaStatus() {
                 reading of each gas, the change since the previous one, and — where three or more
                 samples span four months or more — a least-squares rate. Clipping the date window
                 would change which samples form the rate group, so it is deliberately not offered
-                here.
+                here. To classify figures that are not on record yet, use{' '}
+                <Link className="link" to="/dga-entry">
+                  DGA Status Entry
+                </Link>
+                .
               </p>
             </div>
           </div>

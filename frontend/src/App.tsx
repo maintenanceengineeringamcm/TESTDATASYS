@@ -7,6 +7,7 @@ import Configuration from './pages/Configuration'
 import Dashboard from './pages/Dashboard'
 import DgaExplorer from './pages/DgaExplorer'
 import DgaStatus from './pages/DgaStatus'
+import DgaStatusEntry from './pages/DgaStatusEntry'
 import DuvalDiagnosis from './pages/DuvalDiagnosis'
 import HealthIndex from './pages/HealthIndex'
 import HistoryView from './pages/HistoryView'
@@ -27,6 +28,7 @@ export default function App() {
         <Route path="duval" element={<DuvalDiagnosis />} />
         <Route path="dga-explorer" element={<DgaExplorer />} />
         <Route path="dga-status" element={<DgaStatus />} />
+        <Route path="dga-entry" element={<DgaStatusEntry />} />
         <Route path="assets" element={<AssetRegister />} />
         <Route path="availability" element={<Availability />} />
         <Route path="history" element={<HistoryView />} />

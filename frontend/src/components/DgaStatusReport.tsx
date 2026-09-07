@@ -1,4 +1,5 @@
-import { AlertTriangle, CheckCircle2, FileText, Printer, Table2, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Download, FileText, Printer, Table2, X } from 'lucide-react'
+import { limitText } from '../lib/dgaStatusCsv'
 import type { DgaStatusGas, DgaStatusReport, DgaLimit } from '../types'
 
 const GAS_LABEL: Record<string, string> = {
@@ -9,12 +10,6 @@ const GAS_LABEL: Record<string, string> = {
   C2H2: 'Acetylene',
   CO: 'Carbon monoxide',
   CO2: 'Carbon dioxide',
-}
-
-export function limitText(limit: DgaLimit): string {
-  if (limit === 'ANY_INCREASE') return 'any increase'
-  if (limit === null || limit === undefined) return 'not available'
-  return String(limit)
 }
 
 const num = (v: number | null | undefined, digits = 1) =>
@@ -52,11 +47,17 @@ function Section({ n, title, children }: { n: number; title: string; children: R
  * The printable DGA status report.
  *
  * Everything an engineer needs to re-derive the verdict by hand: the columns
- * the standard selected, the reading and the limit for every gas, the decision
- * path, and the caveats. Print styling lives in `index.css` under `@media
+ * the standard selected, the reading and the limit for every gas, and the
+ * decision path. Print styling lives in `index.css` under `@media
  * print` — the app shell is a fixed-height scrolling frame, which would
  * otherwise print as one clipped page.
  */
+/** jsPDF is heavy and most visits never export, so it is fetched on click. */
+async function downloadPdf(report: DgaStatusReport) {
+  const { exportDgaStatusPdf } = await import('../lib/dgaStatusPdf')
+  exportDgaStatusPdf(report)
+}
+
 export default function DgaStatusReportView({
   report,
   onClose,
@@ -76,12 +77,15 @@ export default function DgaStatusReportView({
       <div className="card-head print-hide !py-3">
         <FileText className="h-4 w-4 text-brand-600" />
         <h2 className="text-sm font-bold text-ink">DGA Status Report</h2>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
           <button className="btn-ghost !py-1.5 text-xs" onClick={onCsv}>
             <Table2 className="h-3.5 w-3.5" /> Evidence CSV
           </button>
-          <button className="btn-primary !py-1.5 text-xs" onClick={() => window.print()}>
-            <Printer className="h-3.5 w-3.5" /> Print / save as PDF
+          <button className="btn-ghost !py-1.5 text-xs" onClick={() => window.print()}>
+            <Printer className="h-3.5 w-3.5" /> Print
+          </button>
+          <button className="btn-primary !py-1.5 text-xs" onClick={() => downloadPdf(report)}>
+            <Download className="h-3.5 w-3.5" /> Download PDF
           </button>
           <button className="btn-ghost !py-1.5 text-xs" onClick={onClose}>
             <X className="h-3.5 w-3.5" /> Close
@@ -99,10 +103,10 @@ export default function DgaStatusReportView({
             <h1 className="mt-1 font-mono text-xl font-bold text-ink">{report.asset}</h1>
             <p className="mt-1 text-xs text-ink-muted">{report.standard}</p>
           </div>
-          <div
-            className="rounded-xl px-5 py-3 text-center"
-            style={{ background: s.bg, border: `2px solid ${s.color}` }}
-          >
+          {/* The status carries its meaning in the words and their colour; the
+              filled card it used to sit in added weight without adding
+              information, and cost ink on every printed copy. */}
+          <div className="text-right">
             <p className="text-2xl font-bold leading-none" style={{ color: s.color }}>
               {s.statusLabel}
             </p>
@@ -293,20 +297,8 @@ export default function DgaStatusReportView({
           </Section>
         )}
 
-        {/* ---- 6. Recommendations ---- */}
-        <Section n={6} title="Recommended actions">
-          <ul className="space-y-1.5">
-            {report.recommendations.map((r, i) => (
-              <li key={i} className="flex items-start gap-2 text-sm text-ink">
-                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand-500" />
-                {r}
-              </li>
-            ))}
-          </ul>
-        </Section>
-
-        {/* ---- 7. Sample history ---- */}
-        <Section n={7} title="Sample history used">
+        {/* ---- 6. Sample history ---- */}
+        <Section n={6} title="Sample history used">
           <div className="scroll-x">
             <table className="w-full min-w-[720px] border-collapse">
               <thead>
@@ -333,18 +325,6 @@ export default function DgaStatusReportView({
               </tbody>
             </table>
           </div>
-        </Section>
-
-        {/* ---- 8. Caveats ---- */}
-        <Section n={8} title="Assumptions and caveats">
-          <ul className="space-y-1.5">
-            {report.caveats.map((c, i) => (
-              <li key={i} className="flex items-start gap-2 text-xs leading-relaxed text-ink-soft">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
-                {c}
-              </li>
-            ))}
-          </ul>
         </Section>
 
         <p className="mt-6 border-t border-line pt-2 text-[10px] text-ink-faint">

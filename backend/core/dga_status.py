@@ -894,6 +894,18 @@ def report(asset: str, date_from: str = "1900-01-01",
     key = (asset or "").strip()
     samples = dga_trend.fetch_samples([key], date_from, date_to).get(key, [])
     age, provenance = _age_for(key)
+    return _build_report(samples, key, age, provenance)
+
+
+def _build_report(samples: list[dict[str, Any]], key: str, age: float | None,
+                  provenance: dict[str, Any] | None,
+                  source: str = "stored") -> dict[str, Any]:
+    """Assemble the report payload from samples that are already in hand.
+
+    Split out of :func:`report` so the hand-entry path produces a payload of
+    exactly the same shape - the frontend renders one report component, not two,
+    and a what-if assessment is therefore as auditable as a stored one.
+    """
     result = classify(samples, age, key)
     result["ageSource"] = provenance
 
@@ -927,6 +939,7 @@ def report(asset: str, date_from: str = "1900-01-01",
     return {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "asset": key,
+        "source": source,
         "status": result,
         "sampleTable": sample_rows,
         "limitsUsed": limits_used,
@@ -977,3 +990,161 @@ def _caveats(result: dict[str, Any]) -> list[str]:
                "the unit sits from the fleet population, not what fault is present - use "
                "the Duval methods for that.")
     return out
+
+
+# --------------------------------------------------------------------------
+# Hand-entered data
+# --------------------------------------------------------------------------
+# The same classifier, fed from a form instead of the database. This exists for
+# three real cases: a unit whose lab results have not been loaded yet, a
+# what-if check against figures read off a test certificate, and validating the
+# port against the known-answer vector in the spec. Nothing here re-implements
+# the decision - it normalises input and hands it to `classify`.
+
+class ManualEntryError(ValueError):
+    """Input the caller must fix. The route turns this into a 400."""
+
+
+# What a form row may carry, mapped onto the internal sample column names.
+MANUAL_FIELDS = {g: GAS_COLUMN[g] for g in GASES}
+MANUAL_FIELDS.update({"O2": "O2ppm", "N2": "N2ppm"})
+
+# A ppm reading above this is almost certainly a typo or a wrong unit. The
+# guide's own extreme-value flag sits far below it, so rejecting here costs
+# nothing real and catches a misplaced decimal point.
+MANUAL_MAX_PPM = 1_000_000
+
+
+def _manual_number(value: Any, field: str, row_no: int) -> float | None:
+    """One gas cell: blank means 'not measured', never 'zero'.
+
+    The distinction matters to the standard - section 1 says an unmeasured gas
+    is skipped in every comparison, whereas a measured zero is a real reading
+    that participates in deltas.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise ManualEntryError(
+            f"Sample {row_no}: {field} is not a number ({value!r}). Leave it blank "
+            f"if the gas was not measured.")
+    if out != out or out in (float("inf"), float("-inf")):
+        raise ManualEntryError(f"Sample {row_no}: {field} is not a finite number.")
+    if out < 0:
+        raise ManualEntryError(f"Sample {row_no}: {field} is negative ({out:g}). "
+                               f"Dissolved-gas concentrations cannot be below zero.")
+    if out > MANUAL_MAX_PPM:
+        raise ManualEntryError(
+            f"Sample {row_no}: {field} is {out:g} ppm, beyond anything physically "
+            f"plausible - check the value and the unit.")
+    return out
+
+
+def _manual_samples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Turn form rows into the sample dicts `classify` reads.
+
+    Rows arrive as ``{date, H2, CH4, ..., O2, N2}``; the classifier wants
+    ``{DateSampled, H2ppm, ...}``. Validation is strict and the messages name
+    the row, because a silently dropped sample would change the rate group and
+    therefore the status.
+    """
+    if not isinstance(rows, list) or not rows:
+        raise ManualEntryError("Enter at least one sample before running the "
+                               "classification.")
+    if len(rows) > 24:
+        raise ManualEntryError("At most 24 samples can be entered at once; the rate "
+                               "window only ever uses the newest six.")
+
+    out: list[dict[str, Any]] = []
+    seen_dates: set[str] = set()
+
+    for i, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ManualEntryError(f"Sample {i} is not a valid row.")
+
+        raw_date = str(row.get("date") or "").strip()
+        if not raw_date:
+            raise ManualEntryError(f"Sample {i}: a sampling date is required - the "
+                                   f"date decides the rate window and the Table 4 "
+                                   f"period band.")
+        parsed = dga_trend._parse_date(raw_date)
+        if parsed is None:
+            raise ManualEntryError(f"Sample {i}: '{raw_date}' is not a date the system "
+                                   f"can read. Use YYYY-MM-DD.")
+        iso = parsed.strftime("%Y-%m-%d")
+        if iso in seen_dates:
+            raise ManualEntryError(f"Sample {i}: two samples are dated {iso}. Each "
+                                   f"sample needs its own date.")
+        seen_dates.add(iso)
+
+        sample: dict[str, Any] = {"DateSampled": iso}
+        for field, column in MANUAL_FIELDS.items():
+            sample[column] = _manual_number(row.get(field), field, i)
+
+        if all(sample[GAS_COLUMN[g]] is None for g in GASES):
+            raise ManualEntryError(f"Sample {i} ({iso}) has no gas readings at all. "
+                                   f"Enter at least one gas or remove the row.")
+        out.append(sample)
+
+    out.sort(key=lambda s: s["DateSampled"])
+    return out
+
+
+def _manual_age(value: Any) -> float | None:
+    """Age in years, or None for 'unknown' - which selects the Unknown column."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        age = float(value)
+    except (TypeError, ValueError):
+        raise ManualEntryError(f"Age '{value}' is not a number. Leave it blank if the "
+                               f"transformer's age is unknown.")
+    if age < 0:
+        raise ManualEntryError("Age cannot be negative.")
+    if age > 120:
+        raise ManualEntryError(f"An age of {age:g} years is implausible - enter the age "
+                               f"in years, not the year of manufacture.")
+    return age
+
+
+def manual_report(rows: list[dict[str, Any]], age_years: Any = None,
+                  label: str = "") -> dict[str, Any]:
+    """Classify hand-entered samples and return the full report payload.
+
+    Same shape as :func:`report`, so the frontend renders and exports it through
+    exactly the same path as a stored asset. Raises :class:`ManualEntryError`
+    for anything the user has to correct.
+    """
+    samples = _manual_samples(rows)
+    age = _manual_age(age_years)
+
+    name = (label or "").strip() or "Entered data"
+    provenance = {
+        "manufactureYear": None,
+        "label": ("Age entered by hand" if age is not None
+                  else "Age not supplied - Unknown age column used"),
+        "source": "manual-entry",
+        "inheritedFrom": None,
+    }
+
+    payload = _build_report(samples, name, age, provenance, source="manual")
+
+    # An entered assessment is only as good as what was typed in, and the
+    # report is printable - so the caveat travels with it rather than living
+    # only in the screen that produced it.
+    payload["caveats"].insert(0, (
+        "This assessment was run against hand-entered values, not laboratory "
+        "records held in the system. The figures have not been checked against "
+        "CEB_DGA_DATA and no sample provenance is recorded."))
+    if age is None:
+        payload["caveats"].insert(1, (
+            "No transformer age was entered, so the Unknown-age column of Tables 1 "
+            "and 2 was used. Supplying the age can move the unit into a different "
+            "column and change the status."))
+    return payload

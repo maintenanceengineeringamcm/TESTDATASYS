@@ -310,9 +310,25 @@ export interface DgaStatusResult {
   standard: string
 }
 
+/** One hand-entered sample row. A blank gas means "not measured", never zero. */
+export interface DgaManualSample {
+  date: string
+  H2: string
+  CH4: string
+  C2H6: string
+  C2H4: string
+  C2H2: string
+  CO: string
+  CO2: string
+  O2: string
+  N2: string
+}
+
 export interface DgaStatusReport {
   generatedAt: string
   asset: string
+  /** 'stored' = read from CEB_DGA_DATA, 'manual' = classified from typed-in values. */
+  source?: 'stored' | 'manual'
   status: DgaStatusResult
   sampleTable: Record<string, number | string | null>[]
   limitsUsed: {
