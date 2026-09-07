@@ -1,0 +1,26 @@
+# --- Backend (Flask) --------------------------------------------------------
+
+# Local DB / API credentials (HI_DB_*, HI_TOMMS_DB_* - see config.py)
+.env
+
+# Snapshot store written by the 08:00 scheduled job (run_snapshot.py).
+# Regenerate with: python run_snapshot.py
+snapshots/*.db
+snapshots/*.db-shm
+snapshots/*.db-wal
+snapshots/manufacture_years.json
+
+# Snapshot / application logs
+logs/
+*.log
+
+# Trained DGA model artefacts - regenerate with: python train_model.py
+# (model_card.json IS tracked, it documents the shipped model.)
+ml_models/*.pkl
+ml_models/*.joblib
+ml_models/*.json
+!ml_models/model_card.json
+
+__pycache__/
+*.py[cod]
+.pytest_cache/

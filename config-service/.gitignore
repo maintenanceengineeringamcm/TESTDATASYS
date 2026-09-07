@@ -1,0 +1,11 @@
+# --- Config service ---------------------------------------------------------
+
+# Live score-band / threshold overrides written through the API.
+# Local runtime state, not source - back it up separately if it matters.
+config_store.db
+config_store.db-shm
+config_store.db-wal
+
+.env
+__pycache__/
+*.py[cod]

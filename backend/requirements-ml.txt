@@ -1,0 +1,9 @@
+# Optional extras. The system runs fully without these; the AI fault-classifier
+# endpoint reports "model not available" until they are installed AND training
+# data is placed in backend/ml_data/ (see core/ml.py).
+numpy>=1.26
+pandas>=2.0
+scikit-learn>=1.4
+xgboost>=2.0
+joblib>=1.3
+openpyxl>=3.1

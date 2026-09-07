@@ -1,0 +1,25 @@
+# --- Frontend (React + Vite) ------------------------------------------------
+
+node_modules/
+dist/
+dist-ssr/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# Vite / tooling caches
+.vite/
+.eslintcache
+
+# Local env overrides (VITE_* vars)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+*.local
