@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, useApi } from '../api'
 import DgaAssetPicker from '../components/DgaAssetPicker'
+import DgaPdfExportDialog from '../components/DgaPdfExportDialog'
 import DgaStatusReportView from '../components/DgaStatusReport'
 import ScopeBanner from '../components/ScopeBanner'
 import { useScope } from '../components/ScopeContext'
@@ -63,7 +64,7 @@ function StatusPill({
 }
 
 /**
- * The Figure 2 decision path, drawn as the flowchart it is.
+ * The status decision path, drawn as a flowchart.
  *
  * The status alone is not defensible on its own; an engineer signing it off has
  * to see which box the unit fell out of. Each step carries its answer in words
@@ -108,8 +109,7 @@ function DecisionFlow({ result }: { result: DgaStatusResult }) {
 
 function Assessment({ asset }: { asset: string }) {
   const [showReport, setShowReport] = useState(false)
-  const [pdfBusy, setPdfBusy] = useState(false)
-  const [pdfError, setPdfError] = useState<string | null>(null)
+  const [pdfDialog, setPdfDialog] = useState(false)
   const path = asset ? `/dga/status/${encodeURIComponent(asset)}` : null
   const status = useApi<DgaStatusResult>(path, [asset])
   const report = useApi<DgaStatusReport>(
@@ -126,25 +126,11 @@ function Assessment({ asset }: { asset: string }) {
 
   // The PDF is built from the full report payload, which the summary view has
   // not fetched. Pulling it on demand keeps the assessment screen light while
-  // still letting an engineer take the signed document in one click.
-  async function downloadPdf() {
-    if (!asset) return
-    setPdfBusy(true)
-    setPdfError(null)
-    try {
-      const [{ exportDgaStatusPdf }, full] = await Promise.all([
-        import('../lib/dgaStatusPdf'),
-        report.data
-          ? Promise.resolve(report.data)
-          : api.get<DgaStatusReport>(`/dga/status/report/${encodeURIComponent(asset)}`),
-      ])
-      exportDgaStatusPdf(full)
-    } catch (err) {
-      setPdfError(err instanceof Error ? err.message : 'Could not build the PDF.')
-    } finally {
-      setPdfBusy(false)
-    }
-  }
+  // still letting an engineer take the signed document from here.
+  const loadFullReport = () =>
+    report.data
+      ? Promise.resolve(report.data)
+      : api.get<DgaStatusReport>(`/dga/status/report/${encodeURIComponent(asset)}`)
 
   if (!asset) {
     return (
@@ -153,7 +139,7 @@ function Assessment({ asset }: { asset: string }) {
           icon={ClipboardList}
           title="Select an asset to classify"
           hint="Pick a transformer with dissolved-gas history to run the IEEE C57.104-2019
-                Figure 2 status decision and produce its report."
+                status decision and produce its report."
         />
       </div>
     )
@@ -188,19 +174,14 @@ function Assessment({ asset }: { asset: string }) {
         <div className="card-head !py-3">
           <ShieldAlert className="h-4 w-4 text-brand-600" />
           <h2 className="text-sm font-bold text-ink">
-            Status classification — IEEE C57.104-2019, Figure 2
+            Status classification — IEEE C57.104-2019
           </h2>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <button className="btn-ghost !py-1.5 text-xs" onClick={downloadCsv}>
               <Table2 className="h-3.5 w-3.5" /> Evidence CSV
             </button>
-            <button
-              className="btn-ghost !py-1.5 text-xs"
-              onClick={downloadPdf}
-              disabled={pdfBusy}
-            >
-              <Download className="h-3.5 w-3.5" />
-              {pdfBusy ? 'Building…' : 'Download PDF'}
+            <button className="btn-ghost !py-1.5 text-xs" onClick={() => setPdfDialog(true)}>
+              <Download className="h-3.5 w-3.5" /> Download PDF
             </button>
             <button className="btn-primary !py-1.5 text-xs" onClick={() => setShowReport(true)}>
               <FileText className="h-3.5 w-3.5" /> Full report
@@ -208,9 +189,6 @@ function Assessment({ asset }: { asset: string }) {
           </div>
         </div>
         <div className="card-pad">
-          {pdfError && (
-            <p className="mb-3 rounded-lg bg-red-50 p-2.5 text-xs text-red-700">{pdfError}</p>
-          )}
           <div className="flex flex-wrap items-start gap-6">
             <div
               className="rounded-xl px-6 py-4 text-center"
@@ -253,6 +231,12 @@ function Assessment({ asset }: { asset: string }) {
           </dl>
         </div>
       </div>
+
+      <DgaPdfExportDialog
+        open={pdfDialog}
+        onClose={() => setPdfDialog(false)}
+        loadReport={loadFullReport}
+      />
 
       {/* ---- Flags that change what an engineer should do next ---- */}
       {(s.pendingConfirmation || s.extreme.length > 0 || s.deEscalationCandidate) && (
@@ -359,14 +343,7 @@ function Assessment({ asset }: { asset: string }) {
                   >
                     {t.kind}
                   </span>
-                  <span className="text-sm text-ink">
-                    {t.text}
-                    {t.verify && (
-                      <span className="ml-1.5 text-[11px] text-amber-700">
-                        (limit flagged for verification)
-                      </span>
-                    )}
-                  </span>
+                  <span className="text-sm text-ink">{t.text}</span>
                 </li>
               ))}
             </ol>
@@ -403,6 +380,7 @@ function Assessment({ asset }: { asset: string }) {
                   const flags = [
                     g.exceedsT2 && 'level > T2',
                     !g.exceedsT2 && g.exceedsT1 && 'level > T1',
+                    g.atT1 && 'level = T1',
                     g.exceedsT3 && 'Δ > T3',
                     g.exceedsT4 && 'rate > T4',
                   ].filter(Boolean) as string[]
@@ -418,11 +396,9 @@ function Assessment({ asset }: { asset: string }) {
                       <td className="td num text-[11px] text-ink-muted">{g.latestDate ?? '—'}</td>
                       <td className="td num text-xs text-ink-muted">
                         {g.t1 ?? '—'}
-                        {g.t1Verify && <span className="text-amber-600"> ‡</span>}
                       </td>
                       <td className="td num text-xs text-ink-muted">
                         {g.t2 ?? '—'}
-                        {g.t2Verify && <span className="text-amber-600"> ‡</span>}
                       </td>
                       <td className="td num text-xs">
                         {g.delta === null ? (
@@ -436,7 +412,6 @@ function Assessment({ asset }: { asset: string }) {
                       </td>
                       <td className="td num text-xs text-ink-muted">
                         {limitText(g.t3)}
-                        {g.t3Verify && <span className="text-amber-600"> ‡</span>}
                       </td>
                       <td className="td num text-xs">
                         {g.rate === null
@@ -445,7 +420,6 @@ function Assessment({ asset }: { asset: string }) {
                       </td>
                       <td className="td num text-xs text-ink-muted">
                         {s.ratesAvailable ? limitText(g.t4) : '—'}
-                        {g.t4Verify && <span className="text-amber-600"> ‡</span>}
                       </td>
                       <td className="td">
                         {!g.measured ? (
@@ -474,10 +448,6 @@ function Assessment({ asset }: { asset: string }) {
               </tbody>
             </table>
           </div>
-          <p className="mt-2 text-[11px] text-ink-muted">
-            ‡ marks a limit taken from a cell the source scan rendered ambiguously — verify it
-            against a printed copy of the standard before acting on it.
-          </p>
         </div>
       </div>
 
@@ -543,7 +513,7 @@ function Fleet({ onOpen }: { onOpen: (asset: string) => void }) {
     <div className="space-y-4">
       <div className="card card-pad flex flex-wrap items-center gap-3">
         <p className="min-w-0 flex-1 text-sm text-ink-soft">
-          Classify every asset with DGA history in the current scope against Figure 2.
+          Classify every asset with DGA history in the current scope against IEEE C57.104-2019.
         </p>
         <button className="btn-primary text-sm" onClick={run} disabled={loading}>
           <Layers className="h-4 w-4" />
@@ -700,12 +670,8 @@ function ReferenceTables() {
   if (error) return <ErrorNote message={error} onRetry={reload} />
   if (!data) return null
 
-  const cell = (c: { limit: number | string | null; verify: boolean } | undefined) => (
-    <>
-      {limitText((c?.limit ?? null) as never)}
-      {c?.verify && <span className="text-amber-600"> ‡</span>}
-    </>
-  )
+  const cell = (c: { limit: number | string | null; verify: boolean } | undefined) =>
+    limitText((c?.limit ?? null) as never)
 
   return (
     <div className="space-y-4">
@@ -824,27 +790,12 @@ function ReferenceTables() {
           </table>
         </div>
       </div>
-
-      <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
-        <div className="flex items-start gap-3">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
-          <div className="text-sm leading-relaxed text-amber-900">
-            <p className="font-bold">Verify these numbers before production use.</p>
-            <p className="mt-1">
-              The decision logic is exact, but the tables were reconstructed from a scanned copy
-              of the standard. Cells marked ‡ were faint or merged in the source; the one Table 3
-              cell shown as “not available” could not be read at all, so that comparison is
-              skipped rather than guessed and every affected result says so.
-            </p>
-          </div>
-        </div>
-      </div>
     </div>
   )
 }
 
 /**
- * DGA Status — the IEEE C57.104-2019 Figure 2 classifier.
+ * DGA Status — the IEEE C57.104-2019 status classifier.
  *
  * Deliberately a separate section from Trend Analysis. The trend screen answers
  * "what number does this feed the health index"; this one answers "what status
@@ -868,7 +819,7 @@ export default function DgaStatus() {
           accent="#195B96"
           icon={ShieldAlert}
           title="DGA Status"
-          subtitle="IEEE C57.104-2019 Figure 2 — Status 1 / 2 / 3 from gas levels, change and rate,
+          subtitle="IEEE C57.104-2019 — Status 1 / 2 / 3 from gas levels, change and rate,
                     with the signed report"
         />
         <ScopeBanner />

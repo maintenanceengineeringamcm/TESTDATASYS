@@ -3,7 +3,7 @@ import DgaManualAssessment from '../components/DgaManualAssessment'
 import { SectionHeader } from '../components/ui'
 
 /**
- * DGA Status Entry — the Figure 2 classifier over values typed in by hand.
+ * DGA Status Entry — the status classifier over values typed in by hand.
  *
  * Its own section rather than a mode of the DGA Status screen, because it
  * answers a different question with a different input. That screen asks "what
@@ -25,7 +25,7 @@ export default function DgaStatusEntry() {
           accent="#195B96"
           icon={Keyboard}
           title="DGA Status Entry"
-          subtitle="Classify dissolved-gas results you type in — IEEE C57.104-2019 Figure 2,
+          subtitle="Classify dissolved-gas results you type in — IEEE C57.104-2019,
                     with the same evidence table and report as a stored asset"
         />
       </div>

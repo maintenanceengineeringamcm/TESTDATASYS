@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 import db
@@ -900,6 +902,50 @@ def ml_predict():
         gases.get("H2", 0), gases.get("CH4", 0), gases.get("C2H6", 0),
         gases.get("C2H4", 0), gases.get("C2H2", 0), asset_type=asset_type,
     ))
+
+
+# --------------------------------------------------------------------------
+# Built frontend
+# --------------------------------------------------------------------------
+# Registered last, so every /api rule above wins. In development this does
+# nothing useful - Vite serves the UI and proxies here - but in production it
+# is what lets the whole system answer on a single port, with the browser and
+# the API on the same origin. That removes CORS and the need for IIS or nginx
+# in front.
+DIST = Path(Config.FRONTEND_DIST)
+
+
+@app.get("/")
+def spa_index():
+    if not (DIST / "index.html").is_file():
+        return jsonify({
+            "error": "frontend-not-built",
+            "message": (f"No built frontend at {DIST}. Run 'npm run build' in the "
+                        f"frontend folder, or point HI_FRONTEND_DIST at the dist "
+                        f"directory."),
+        }), 503
+    return send_from_directory(DIST, "index.html")
+
+
+@app.get("/<path:path>")
+def spa_files(path: str):
+    """A built asset if it exists, otherwise index.html.
+
+    The UI uses client-side routing, so a deep link such as /dga-entry is not a
+    file on disk - it has to return the shell and let the router resolve it.
+    Unknown /api paths must still 404 as JSON rather than being answered with
+    HTML, which would turn a typo into a confusing parse error in the client.
+    """
+    if path.startswith("api/"):
+        return jsonify({"error": "not-found", "message": f"No API route /{path}"}), 404
+    candidate = (DIST / path)
+    try:
+        candidate.relative_to(DIST)          # refuse ../ traversal
+    except ValueError:
+        return jsonify({"error": "not-found"}), 404
+    if candidate.is_file():
+        return send_from_directory(DIST, path)
+    return spa_index()
 
 
 if __name__ == "__main__":

@@ -214,7 +214,7 @@ export interface AssetTrend {
 }
 
 /* --------------------------------------------------------------------------
- * DGA status - IEEE C57.104-2019, Figure 2
+ * DGA status - IEEE C57.104-2019
  *
  * A different question from `AssetTrend` above: the trend gives the health
  * index a 0-1 number, this puts the unit in Status 1/2/3 against the standard's
@@ -245,6 +245,8 @@ export interface DgaStatusGas {
   t4: DgaLimit
   t4Verify: boolean
   exceedsT1: boolean
+  /** Exactly on the Table 1 level - not below it, so not Status 1. */
+  atT1: boolean
   exceedsT2: boolean
   exceedsT3: boolean
   exceedsT4: boolean
@@ -253,7 +255,7 @@ export interface DgaStatusGas {
 
 export interface DgaStatusTrigger {
   gas: string
-  kind: 'level>T2' | 'level>T1' | 'delta>T3' | 'rate>T4' | 'C2H2 any-increase'
+  kind: 'level>T2' | 'level>T1' | 'level=T1' | 'delta>T3' | 'rate>T4'
   value: number | null
   limit: DgaLimit
   /** 3 = pushes the unit to Status 3, 2 = to Status 2. Sorted worst first. */

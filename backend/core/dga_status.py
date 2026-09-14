@@ -206,8 +206,7 @@ def reference_tables() -> dict[str, Any]:
         "table3": {r: flat(TABLE3[r]) for r in RATIO_BANDS},
         "table4": {r: {p: flat(TABLE4[r][p]) for p in PERIOD_BANDS} for r in RATIO_BANDS},
         "anyIncrease": ANY_INCREASE,
-        "source": ("IEEE C57.104-2019 6.1.3, reconstructed from a scanned copy - "
-                   "cells marked for verification are flagged"),
+        "source": "IEEE C57.104-2019 6.1.3",
     }
 
 
@@ -279,6 +278,10 @@ class GasEvidence:
     t4: Any = None
     t4Verify: bool = False
     exceedsT1: bool = False
+    # Exactly on the Table 1 level: not above it, but not *below* it either, so
+    # the unit cannot be Status 1. Carried as its own flag so the evidence table
+    # can say why rather than showing "within" next to a Status 2.
+    atT1: bool = False
     exceedsT2: bool = False
     exceedsT3: bool = False
     exceedsT4: bool = False
@@ -301,6 +304,38 @@ def _points(samples: list[dict[str, Any]], gas: str) -> list[tuple[datetime, flo
             continue
         out.append((date, float(value)))
     out.sort(key=lambda p: p[0])
+    return out
+
+
+def _merge_duplicates(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse rows that are the same sample entered twice.
+
+    CEB_DGA_DATA carries repeated rows for one sampling date - identical, or
+    differing only in a gas one copy left blank. Kept apart, the copy becomes
+    the "previous sample", so the change since the real previous sample reads
+    as zero and the duplicate also counts towards the rate window's points.
+
+    Rows on the same date merge only when every gas both of them measured
+    agrees; the merged row takes whichever copy has a value. Same-date rows that
+    genuinely disagree are different results (a retest) and are left as they
+    are. Expects `samples` sorted by date.
+    """
+    out: list[dict[str, Any]] = []
+    for s in samples:
+        date = dga_trend._parse_date(s.get("DateSampled"))
+        prev = out[-1] if out else None
+        if (prev is not None and date is not None
+                and dga_trend._parse_date(prev.get("DateSampled")) == date
+                and all(prev.get(GAS_COLUMN[g]) is None or s.get(GAS_COLUMN[g]) is None
+                        or float(prev[GAS_COLUMN[g]]) == float(s[GAS_COLUMN[g]])
+                        for g in GASES)):
+            merged = dict(prev)
+            for key, value in s.items():
+                if merged.get(key) is None and value is not None:
+                    merged[key] = value
+            out[-1] = merged
+            continue
+        out.append(s)
     return out
 
 
@@ -347,6 +382,7 @@ def classify(samples: list[dict[str, Any]], age_years: float | None = None,
         and any(s.get(GAS_COLUMN[g]) is not None for g in GASES)
     ]
     usable.sort(key=lambda s: dga_trend._parse_date(s["DateSampled"]))
+    usable = _merge_duplicates(usable)
 
     if not usable:
         return _no_data(asset, "No DGA sample with a usable date and gas reading.")
@@ -496,7 +532,7 @@ def classify(samples: list[dict[str, Any]], age_years: float | None = None,
         "decisionTrace": _trace(all_levels_below_t1, delta_tripped, rate_tripped,
                                 rates_available, measured, status),
         "verifyCells": _verify_cells(measured),
-        "standard": "IEEE C57.104-2019, Figure 2",
+        "standard": "IEEE C57.104-2019",
     }
 
 
@@ -516,7 +552,7 @@ def _no_data(asset: str, message: str) -> dict[str, Any]:
         "deEscalationCandidate": False, "samples": 0,
         "firstSample": None, "latestSample": None, "rateWindow": None,
         "decisionTrace": [], "verifyCells": [],
-        "standard": "IEEE C57.104-2019, Figure 2",
+        "standard": "IEEE C57.104-2019",
     }
 
 
@@ -579,6 +615,7 @@ def _evaluate_gas(gas: str, samples: list[dict[str, Any]], window: list[dict[str
     # Levels against Tables 1 and 2.
     if t1 is not None:
         ev.exceedsT1 = ev.latest > t1
+        ev.atT1 = ev.latest == t1
     if t2 is not None:
         ev.exceedsT2 = ev.latest > t2
 
@@ -610,7 +647,7 @@ def _evaluate_gas(gas: str, samples: list[dict[str, Any]], window: list[dict[str
 
 def _limit_text(limit: Any) -> str:
     if limit == ANY_INCREASE:
-        return "any increase"
+        return "N/A"
     if limit is None:
         return "no limit available"
     return f"{limit:g}"
@@ -633,19 +670,26 @@ def _triggers(measured: list[GasEvidence], rates_available: bool) -> list[dict[s
                          "limit": e.t1, "severity": 2, "verify": e.t1Verify,
                          "text": (f"{e.gas} is {e.latest:g} ppm, above the Table 1 "
                                   f"(90th percentile) level of {_limit_text(e.t1)} ppm.")})
+        elif e.atT1:
+            rows.append({"gas": e.gas, "kind": "level=T1", "value": e.latest,
+                         "limit": e.t1, "severity": 2, "verify": e.t1Verify,
+                         "text": (f"{e.gas} is {e.latest:g} ppm, exactly on the Table 1 "
+                                  f"(90th percentile) level of {_limit_text(e.t1)} ppm - "
+                                  "not below it, so the unit cannot be Status 1.")})
         if e.exceedsT3:
-            kind = "C2H2 any-increase" if e.t3 == ANY_INCREASE else "delta>T3"
-            rows.append({"gas": e.gas, "kind": kind, "value": e.delta, "limit": e.t3,
+            allowance = ("exceeding the Table 3 limit" if e.t3 == ANY_INCREASE
+                         else f"against a Table 3 allowance of {_limit_text(e.t3)}")
+            rows.append({"gas": e.gas, "kind": "delta>T3", "value": e.delta, "limit": e.t3,
                          "severity": 2, "verify": e.t3Verify,
                          "text": (f"{e.gas} rose {e.delta:+g} ppm since {e.previousDate}, "
-                                  f"against a Table 3 allowance of {_limit_text(e.t3)}.")})
+                                  f"{allowance}.")})
         if rates_available and e.exceedsT4:
-            kind = "C2H2 any-increase" if e.t4 == ANY_INCREASE else "rate>T4"
-            rows.append({"gas": e.gas, "kind": kind, "value": e.rate, "limit": e.t4,
+            allowance = ("exceeding the Table 4 limit" if e.t4 == ANY_INCREASE
+                         else f"against a Table 4 allowance of {_limit_text(e.t4)} ppm/year")
+            rows.append({"gas": e.gas, "kind": "rate>T4", "value": e.rate, "limit": e.t4,
                          "severity": 3, "verify": e.t4Verify,
                          "text": (f"{e.gas} is rising at {e.rate:+.1f} ppm/year over "
-                                  f"{e.ratePoints} samples, against a Table 4 allowance "
-                                  f"of {_limit_text(e.t4)} ppm/year.")})
+                                  f"{e.ratePoints} samples, {allowance}.")})
     rows.sort(key=lambda r: -r["severity"])
     return rows
 
@@ -667,14 +711,12 @@ def _status2_reason(measured: list[GasEvidence], delta_tripped: bool) -> str:
     parts = []
     if over_t1:
         parts.append(f"{', '.join(over_t1)} above the Table 1 (90th percentile) level")
+    on_limit = [e.gas for e in measured if e.atT1]
+    if on_limit:
+        parts.append(f"{', '.join(on_limit)} sitting exactly on its Table 1 level, which "
+                     "the standard counts as neither below nor above")
     if delta_tripped:
         parts.append(f"{', '.join(over_t3)} changing by more than Table 3 allows")
-    if not parts:
-        # Nothing is strictly over a limit, so a value is sitting exactly on one.
-        on_limit = [e.gas for e in measured
-                    if e.latest is not None and e.t1 is not None and e.latest == e.t1]
-        parts.append(f"{', '.join(on_limit) or 'a gas'} sitting exactly on its Table 1 "
-                     "level, which the standard counts as neither below nor above")
     return "Not all quiet, but nothing above Table 2 either: " + " and ".join(parts) + "."
 
 
@@ -719,33 +761,62 @@ def _trace(all_below_t1: bool, delta_tripped: bool, rate_tripped: bool,
            status: int) -> list[dict[str, Any]]:
     """The Figure 2 path, one row per decision box, for the report."""
     over_t1 = [e.gas for e in measured if e.exceedsT1]
+    on_t1 = [e.gas for e in measured if e.atT1]
     over_t3 = [e.gas for e in measured if e.exceedsT3]
     over_t4 = [e.gas for e in measured if e.exceedsT4]
     over_t2 = [e.gas for e in measured if e.exceedsT2]
+
+    # The Change and Rate columns of the evidence show "n/a" for a gas that had
+    # nothing to test, so these rows say the same instead of "all within".
+    untested_t3 = [e.gas for e in measured if e.delta is None or e.t3 is None]
+    untested_t4 = [e.gas for e in measured if e.rate is None or e.t4 is None]
+
+    def within(untested: list[str]) -> str:
+        return f"all within ({', '.join(untested)} not tested)" if untested else "all within"
+
+    t1_detail = "; ".join(p for p in (
+        f"{', '.join(over_t1)} above" if over_t1 else "",
+        f"{', '.join(on_t1)} exactly at the limit" if on_t1 else "",
+    ) if p)
+
+    if delta_tripped:
+        t3_answer, t3_detail = "No", f"{', '.join(over_t3)} over"
+    elif len(untested_t3) == len(measured):
+        t3_answer, t3_detail = "Not applicable", "no gas has an earlier reading to compare"
+    else:
+        t3_answer, t3_detail = "Yes", within(untested_t3)
+
+    if not rates_available:
+        t4_answer, t4_detail = "Not applicable", "no multi-point rate available"
+    elif rate_tripped:
+        t4_answer, t4_detail = "No", f"{', '.join(over_t4)} over"
+    elif len(untested_t4) == len(measured):
+        t4_answer, t4_detail = "Not applicable", "no gas has enough readings in the rate window"
+    else:
+        t4_answer, t4_detail = "Yes", within(untested_t4)
+
     return [
         {"step": "Levels vs Table 1",
          "question": "Is every measured gas below its 90th percentile level?",
          "answer": "Yes" if all_below_t1 else "No",
          "pass": all_below_t1,
-         "detail": "all below" if all_below_t1 else f"{', '.join(over_t1)} above"},
+         "detail": "all below" if all_below_t1 else t1_detail},
         {"step": "Change vs Table 3",
          "question": "Is every change since the previous sample within the allowance?",
-         "answer": "No" if delta_tripped else "Yes",
+         "answer": t3_answer,
          "pass": not delta_tripped,
-         "detail": f"{', '.join(over_t3)} over" if delta_tripped else "all within"},
+         "detail": t3_detail},
         {"step": "Rate vs Table 4",
          "question": "Is every multi-point rate within the allowance?",
-         "answer": ("Not applicable" if not rates_available
-                    else "No" if rate_tripped else "Yes"),
+         "answer": t4_answer,
          "pass": (not rates_available) or (not rate_tripped),
-         "detail": ("no multi-point rate available" if not rates_available
-                    else f"{', '.join(over_t4)} over" if rate_tripped else "all within")},
+         "detail": t4_detail},
         {"step": "Levels vs Table 2",
          "question": "Is any measured gas above its 95th percentile level?",
          "answer": "Yes" if over_t2 else "No",
          "pass": not over_t2,
          "detail": f"{', '.join(over_t2)} above" if over_t2 else "none above"},
-        {"step": "Result", "question": "Figure 2 outcome",
+        {"step": "Result", "question": "Outcome",
          "answer": STATUS_META[status]["label"], "pass": status == 1,
          "detail": STATUS_META[status]["verdict"]},
     ]
@@ -909,10 +980,12 @@ def _build_report(samples: list[dict[str, Any]], key: str, age: float | None,
     result = classify(samples, age, key)
     result["ageSource"] = provenance
 
-    ordered = sorted(
+    # Merged exactly as classify merged them, so "Samples used" and the history
+    # table count the same rows.
+    ordered = _merge_duplicates(sorted(
         (s for s in samples if dga_trend._parse_date(s.get("DateSampled")) is not None),
         key=lambda s: dga_trend._parse_date(s["DateSampled"]),
-    )
+    ))
     sample_rows = [
         {
             "date": dga_trend._parse_date(s["DateSampled"]).strftime("%Y-%m-%d"),
@@ -946,7 +1019,7 @@ def _build_report(samples: list[dict[str, Any]], key: str, age: float | None,
         "recommendations": _recommendations(result),
         "caveats": _caveats(result),
         "standard": ("IEEE C57.104-2019 - Guide for the Interpretation of Gases "
-                     "Generated in Mineral Oil-Immersed Transformers, 6.1.3 / Figure 2"),
+                     "Generated in Mineral Oil-Immersed Transformers, 6.1.3"),
     }
 
 
@@ -980,12 +1053,6 @@ def _recommendations(result: dict[str, Any]) -> list[str]:
 
 def _caveats(result: dict[str, Any]) -> list[str]:
     out = list(result["assumptions"])
-    if result["verifyCells"]:
-        cells = ", ".join(f"{c['gas']} {c['table']} ({c['limit']})"
-                          for c in result["verifyCells"])
-        out.append("These limits came from cells the source scan rendered ambiguously "
-                   "and should be checked against a printed copy of the standard: "
-                   f"{cells}.")
     out.append("This classification answers the status question only. It says how far "
                "the unit sits from the fleet population, not what fault is present - use "
                "the Duval methods for that.")

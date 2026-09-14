@@ -1,6 +1,8 @@
 import { AlertTriangle, CheckCircle2, Download, FileText, Printer, Table2, X } from 'lucide-react'
+import { useState } from 'react'
 import { limitText } from '../lib/dgaStatusCsv'
 import type { DgaStatusGas, DgaStatusReport, DgaLimit } from '../types'
+import DgaPdfExportDialog from './DgaPdfExportDialog'
 
 const GAS_LABEL: Record<string, string> = {
   H2: 'Hydrogen',
@@ -52,12 +54,6 @@ function Section({ n, title, children }: { n: number; title: string; children: R
  * print` — the app shell is a fixed-height scrolling frame, which would
  * otherwise print as one clipped page.
  */
-/** jsPDF is heavy and most visits never export, so it is fetched on click. */
-async function downloadPdf(report: DgaStatusReport) {
-  const { exportDgaStatusPdf } = await import('../lib/dgaStatusPdf')
-  exportDgaStatusPdf(report)
-}
-
 export default function DgaStatusReportView({
   report,
   onClose,
@@ -70,9 +66,16 @@ export default function DgaStatusReportView({
   const s = report.status
   const gases = s.gases.filter((g) => g.measured)
   const unmeasured = s.gases.filter((g) => !g.measured).map((g) => g.gas)
+  const [pdfDialog, setPdfDialog] = useState(false)
 
   return (
     <div className="card">
+      <DgaPdfExportDialog
+        open={pdfDialog}
+        onClose={() => setPdfDialog(false)}
+        loadReport={() => Promise.resolve(report)}
+      />
+
       {/* Controls — never printed. */}
       <div className="card-head print-hide !py-3">
         <FileText className="h-4 w-4 text-brand-600" />
@@ -84,7 +87,7 @@ export default function DgaStatusReportView({
           <button className="btn-ghost !py-1.5 text-xs" onClick={() => window.print()}>
             <Printer className="h-3.5 w-3.5" /> Print
           </button>
-          <button className="btn-primary !py-1.5 text-xs" onClick={() => downloadPdf(report)}>
+          <button className="btn-primary !py-1.5 text-xs" onClick={() => setPdfDialog(true)}>
             <Download className="h-3.5 w-3.5" /> Download PDF
           </button>
           <button className="btn-ghost !py-1.5 text-xs" onClick={onClose}>
@@ -170,22 +173,15 @@ export default function DgaStatusReportView({
                   >
                     {i + 1}
                   </span>
-                  <span className="text-ink">
-                    {t.text}
-                    {t.verify && (
-                      <span className="ml-1.5 text-[11px] text-amber-700">
-                        (limit flagged for verification)
-                      </span>
-                    )}
-                  </span>
+                  <span className="text-ink">{t.text}</span>
                 </li>
               ))}
             </ol>
           )}
         </Section>
 
-        {/* ---- 3. The Figure 2 path ---- */}
-        <Section n={3} title="Decision path (Figure 2)">
+        {/* ---- 3. The decision path ---- */}
+        <Section n={3} title="Decision path">
           <div className="scroll-x">
             <table className="w-full min-w-[560px] border-collapse">
               <thead>
@@ -237,7 +233,7 @@ export default function DgaStatusReportView({
             </table>
           </div>
           {unmeasured.length > 0 && (
-            <p className="mt-2 text-[11px] text-ink-muted">
+            <p className="mt-1 text-[11px] text-ink-muted">
               Not measured, so excluded from every comparison: {unmeasured.join(', ')}.
             </p>
           )}
@@ -338,7 +334,7 @@ export default function DgaStatusReportView({
 }
 
 function GasRow({ g, ratesAvailable }: { g: DgaStatusGas; ratesAvailable: boolean }) {
-  const levelOver = g.exceedsT2 || g.exceedsT1
+  const level = g.exceedsT2 ? 'above T2' : g.exceedsT1 ? 'above T1' : g.atT1 ? 'at T1' : null
   return (
     <tr>
       <td className="td">
@@ -348,19 +344,17 @@ function GasRow({ g, ratesAvailable }: { g: DgaStatusGas; ratesAvailable: boolea
       <td className="td num text-xs font-semibold">{num(g.latest)}</td>
       <td className="td num text-xs text-ink-muted">
         {num(g.t1, 0)}
-        {g.t1Verify && <span className="text-amber-600"> ‡</span>}
       </td>
       <td className="td num text-xs text-ink-muted">
         {num(g.t2, 0)}
-        {g.t2Verify && <span className="text-amber-600"> ‡</span>}
       </td>
       <td className="td">
-        {g.exceedsT2 ? (
+        {level ? (
           <span className="chip bg-red-50 text-[11px] text-red-700">
-            <AlertTriangle className="h-3 w-3" /> above T2
+            <AlertTriangle className="h-3 w-3" /> {level}
           </span>
         ) : (
-          <Verdict over={levelOver} />
+          <Verdict over={false} />
         )}
       </td>
       <td className="td num text-xs">
@@ -375,7 +369,6 @@ function GasRow({ g, ratesAvailable }: { g: DgaStatusGas; ratesAvailable: boolea
       </td>
       <td className="td num text-xs text-ink-muted">
         {limitText(g.t3)}
-        {g.t3Verify && <span className="text-amber-600"> ‡</span>}
       </td>
       <td className="td">
         <Verdict over={g.exceedsT3} na={g.delta === null || g.t3 === null} />
@@ -385,7 +378,6 @@ function GasRow({ g, ratesAvailable }: { g: DgaStatusGas; ratesAvailable: boolea
       </td>
       <td className="td num text-xs text-ink-muted">
         {ratesAvailable ? limitText(g.t4) : '—'}
-        {g.t4Verify && <span className="text-amber-600"> ‡</span>}
       </td>
       <td className="td">
         <Verdict over={g.exceedsT4} na={!ratesAvailable || g.rate === null} />

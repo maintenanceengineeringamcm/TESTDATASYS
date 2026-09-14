@@ -140,6 +140,14 @@ class Config:
     # Owns engineer-edited score bands and weights in its own database. Optional
     # infrastructure: when unreachable the engine falls back to the values in
     # CEB_TRANSMISSION rather than failing to score.
+    # --- built frontend --------------------------------------------------
+    # In development the Vite dev server serves the UI and proxies /api here.
+    # In production there is no Vite, so the API also serves the built SPA and
+    # the whole system answers on one port - which is what makes plain
+    # http://<server-ip>:5000/ work without a reverse proxy or CORS.
+    FRONTEND_DIST = os.getenv(
+        "HI_FRONTEND_DIST", str(BASE_DIR.parent / "frontend" / "dist"))
+
     CONFIG_SERVICE_URL = os.getenv("HI_CONFIG_SERVICE_URL", "http://127.0.0.1:5001")
     CONFIG_SERVICE_TIMEOUT = float(os.getenv("HI_CONFIG_SERVICE_TIMEOUT", "3"))
     CONFIG_SERVICE_TTL = int(os.getenv("HI_CONFIG_SERVICE_TTL", "20"))
