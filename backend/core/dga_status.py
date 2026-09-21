@@ -1009,9 +1009,19 @@ def _build_report(samples: list[dict[str, Any]], key: str, age: float | None,
             "columns": {"ratioBand": r_band, "ageBand": a_band, "periodBand": p_band},
         }
 
+    # Hand-entered data has no asset number to look up - `key` there is whatever
+    # the engineer typed as a label, so there is nothing in the CMMS to name.
+    naming = (attributes.asset_naming(key) if source == "stored" and key
+              else {"assetName": None, "siteName": None, "siteCode": None})
+
     return {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "asset": key,
+        # The CMMS description of the unit and of its substation. Both may be
+        # None; a report identified only by its asset number is still valid.
+        "assetName": naming["assetName"],
+        "siteName": naming["siteName"],
+        "siteCode": naming["siteCode"],
         "source": source,
         "status": result,
         "sampleTable": sample_rows,

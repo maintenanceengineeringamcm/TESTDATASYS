@@ -106,17 +106,25 @@ def newest_row(
     date_col: str = "DateTested",
     date_from: str = OPEN_FROM,
     date_to: str = OPEN_TO,
+    require: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Newest record for one asset inside a date window.
+    """Newest record for one asset inside a date window that carries a value.
+
+    Only rows where at least one `require` column is filled qualify (default:
+    every column asked for). Multi-test tables such as CEB_MT_IBT often have a
+    newer row with moisture filled but BDV empty; without this filter that row
+    would win and hide an older, real BDV. Each reader asks for its own value,
+    so the fallback to older rows happens per value, never for the whole row.
 
     Asset numbers are compared trimmed on both sides - the live data carries
     stray whitespace.
     """
     cols = ", ".join(columns)
+    has_value = " OR ".join(f"{c} IS NOT NULL" for c in (require or columns))
     sql = (
         f"SELECT TOP 1 {cols}, {date_col} AS _d FROM {table} "
         f"WHERE LTRIM(RTRIM(AssetNumber)) = ? AND {date_col} IS NOT NULL "
-        f"  AND {date_col} >= ? AND {date_col} <= ? "
+        f"  AND {date_col} >= ? AND {date_col} <= ? AND ({has_value}) "
         f"ORDER BY {date_col} DESC"
     )
     try:
@@ -323,7 +331,7 @@ def read_age(asset: str, manual_age: float | None = None, **_: Any) -> Reading |
 # ==========================================================================
 def read_furan(asset: str, date_from: str = OPEN_FROM, date_to: str = OPEN_TO) -> Reading | None:
     row = newest_row("CEB_TRANS_FURAN_DP", asset, ["FuranicComponentPpb", "DegreeOfPoly"],
-                     "DateTested", date_from, date_to)
+                     "DateTested", date_from, date_to, require=["FuranicComponentPpb"])
     reading = _single(row, "FuranicComponentPpb", "CEB_TRANS_FURAN_DP")
     if reading and row:
         reading.detail = {"degreeOfPolymerisation": _f(row, "DegreeOfPoly")}
@@ -340,7 +348,8 @@ def read_dga_sample(asset: str, date_from: str = OPEN_FROM,
                     date_to: str = OPEN_TO) -> dict[str, Any] | None:
     """Newest DGA sample, as a gas dict plus its sampling date."""
     cols = list(DGA_GAS_FIELDS.values()) + ["O2ppm", "N2ppm"]
-    row = newest_row("CEB_DGA_DATA", asset, cols, "DateSampled", date_from, date_to)
+    row = newest_row("CEB_DGA_DATA", asset, cols, "DateSampled", date_from, date_to,
+                     require=list(DGA_GAS_FIELDS.values()))
     if not row:
         return None
     gases = {g: _f(row, col) for g, col in DGA_GAS_FIELDS.items()}
@@ -505,7 +514,8 @@ def read_tr_insulation_resistance(asset: str, date_from: str = OPEN_FROM,
                                   date_to: str = OPEN_TO) -> Reading | None:
     """Lowest insulation resistance, newest of two possible test sources."""
     r1 = newest_row("CEB_TRANS_INS_RES_POL_INDX", asset,
-                    _IR_POL_FIELDS + ["PolarityIndex"], "DateTested", date_from, date_to)
+                    _IR_POL_FIELDS + ["PolarityIndex"], "DateTested", date_from, date_to,
+                    require=_IR_POL_FIELDS)
     a = None
     if r1:
         a = _spread([(f, _f(r1, f)) for f in _IR_POL_FIELDS], "min", r1["_d"],
@@ -653,55 +663,58 @@ _CB3_IR = ["TopToEarthRPhaGOhm", "TopToEarthYPhaseGOhm", "TopToEarthBPhaseGOhm",
 _CB3_CR = ["RPhaseUOhm", "YPhaseUOhm", "BPhaseUOhm"]
 
 
-def _cb_row(asset: str, date_from: str, date_to: str) -> tuple[str, dict[str, Any]] | None:
-    """Prefer the three-phase table; fall back to the single-phase one."""
-    r3 = newest_row("CEB_OUT_3PH_CB", asset,
-                    _CB3_IR + _CB3_CR + ["OperationCounterReadings"],
-                    "DateTested", date_from, date_to)
+_CB1_IR = ["TopToEarthGOhm", "BottomToEarthGOhm", "TopToBottomGcOhm"]
+_CB1_CR = ["ContactResistanceUOhm"]
+_CB_OPS = ["OperationCounterReadings"]
+
+
+def _cb_row(asset: str, date_from: str, date_to: str, keys_3ph: list[str],
+            keys_1ph: list[str]) -> tuple[str, dict[str, Any], list[str]] | None:
+    """Newest CB row carrying *this component's* value.
+
+    Prefers the three-phase table and falls back to the single-phase one. Each
+    component asks for its own columns, so a newer test that filled in contact
+    resistance but not IR does not hide an older IR reading.
+    """
+    r3 = newest_row("CEB_OUT_3PH_CB", asset, keys_3ph, "DateTested", date_from, date_to)
     if r3:
-        return "CEB_OUT_3PH_CB", r3
-    r1 = newest_row("CEB_OUT_1PH_CB", asset,
-                    ["TopToEarthGOhm", "BottomToEarthGOhm", "TopToBottomGcOhm",
-                     "ContactResistanceUOhm", "OperationCounterReadings"],
-                    "DateTested", date_from, date_to)
+        return "CEB_OUT_3PH_CB", r3, keys_3ph
+    r1 = newest_row("CEB_OUT_1PH_CB", asset, keys_1ph, "DateTested", date_from, date_to)
     if r1:
-        return "CEB_OUT_1PH_CB", r1
+        return "CEB_OUT_1PH_CB", r1, keys_1ph
     return None
 
 
 def read_cb_operations(asset: str, date_from: str = OPEN_FROM,
                        date_to: str = OPEN_TO) -> Reading | None:
-    found = _cb_row(asset, date_from, date_to)
+    found = _cb_row(asset, date_from, date_to, _CB_OPS, _CB_OPS)
     if not found:
         return None
-    table, row = found
+    table, row, _ = found
     return _single(row, "OperationCounterReadings", table)
 
 
 def read_cb_contact_resistance(asset: str, date_from: str = OPEN_FROM,
                                date_to: str = OPEN_TO) -> Reading | None:
-    found = _cb_row(asset, date_from, date_to)
+    found = _cb_row(asset, date_from, date_to, _CB3_CR, _CB1_CR)
     if not found:
         return None
-    table, row = found
-    keys = _CB3_CR if table == "CEB_OUT_3PH_CB" else ["ContactResistanceUOhm"]
+    table, row, keys = found
     return _spread([(k, _f(row, k)) for k in keys], "max", row["_d"], table)
 
 
 def read_cb_ir(asset: str, date_from: str = OPEN_FROM, date_to: str = OPEN_TO) -> Reading | None:
-    found = _cb_row(asset, date_from, date_to)
+    found = _cb_row(asset, date_from, date_to, _CB3_IR, _CB1_IR)
     if not found:
         return None
-    table, row = found
-    keys = _CB3_IR if table == "CEB_OUT_3PH_CB" else \
-        ["TopToEarthGOhm", "BottomToEarthGOhm", "TopToBottomGcOhm"]
+    table, row, keys = found
     return _spread([(k, _f(row, k)) for k in keys], "min", row["_d"], table)
 
 
 def read_cb_sf6_dewpoint(asset: str, date_from: str = OPEN_FROM,
                          date_to: str = OPEN_TO) -> Reading | None:
     row = newest_row("CEB_SF6_GAS", asset, ["DewPoint", "SF6GasPressure", "SF6GasPurityPerc"],
-                     "DateTested", date_from, date_to)
+                     "DateTested", date_from, date_to, require=["DewPoint"])
     reading = _single(row, "DewPoint", "CEB_SF6_GAS")
     if reading and row:
         reading.detail = {"pressure": _f(row, "SF6GasPressure"),

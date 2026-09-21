@@ -23,7 +23,7 @@ from typing import Any
 
 import db
 from core.readers import (AVAILABILITY_OMICRON, AVAILABILITY_TESTS, OPEN_FROM,
-                          OPEN_TO)
+                          OPEN_TO, availability)
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,77 @@ CATALOGUE = _catalogue()
 
 def catalogue() -> list[dict[str, Any]]:
     return list(CATALOGUE.values())
+
+
+# Test dates outside this window are data-entry noise, not tests: 1753-01-01 is
+# SQL Server's empty-datetime placeholder, and typed years such as 7024 turn up
+# in the CT/VT/SA sheets. Such rows still count as records; they just cannot
+# set the first or last test date.
+PLAUSIBLE_FROM = "1950-01-01"
+
+
+def _span(col: str) -> str:
+    plausible = f"CASE WHEN {col} >= '{PLAUSIBLE_FROM}' AND {col} <= GETDATE() THEN {col} END"
+    return f"MIN({plausible}) AS firstTested, MAX({plausible}) AS lastTested"
+
+
+def _table_summary(test: dict[str, Any]) -> dict[str, Any]:
+    table, date_col = test["table"], test["dateColumn"]
+    return db.query_one(
+        f"SELECT COUNT(*) AS records, "
+        f"COUNT(DISTINCT LTRIM(RTRIM(AssetNumber))) AS assets, "
+        f"{_span(f'[{date_col}]')} FROM {table}"
+    ) or {}
+
+
+def _omicron_summary(test: dict[str, Any]) -> dict[str, Any]:
+    return db.query_one(
+        "SELECT COUNT(*) AS records, COUNT(DISTINCT LTRIM(RTRIM(j.Asset))) AS assets, "
+        f"{_span('e.DateTime')} "
+        "FROM JOB j JOIN EXECUTED_TEST e ON e.Job = j.ID WHERE e.Name LIKE ?",
+        (f"%{test['omicronName']}%",),
+    ) or {}
+
+
+def fleet_summary() -> list[dict[str, Any]]:
+    """The catalogue with fleet-wide record counts and date span per test.
+
+    One aggregate per test across the whole database, cached for ten minutes -
+    the tables only grow when a new test sheet is loaded. A table absent from
+    this database is reported as unavailable rather than failing the list.
+    """
+    def build() -> list[dict[str, Any]]:
+        out = []
+        for test in catalogue():
+            try:
+                row = (_omicron_summary(test) if test["kind"] == "omicron"
+                       else _table_summary(test))
+                message = None
+            except db.DatabaseError as exc:
+                log.warning("test summary failed for %s: %s", test["testId"], exc)
+                row, message = {}, f"Could not read {test['table']}: {exc}"
+            records = int(row.get("records") or 0)
+            out.append({**test, "available": records > 0, "records": records,
+                        "assets": int(row.get("assets") or 0),
+                        "firstTested": row.get("firstTested"),
+                        "lastTested": row.get("lastTested"),
+                        **({"message": message} if message else {})})
+        return out
+    return db.cached("history:fleet-summary", build, ttl=600)
+
+
+def asset_summary(asset: str, date_from: str = OPEN_FROM,
+                  date_to: str = OPEN_TO) -> list[dict[str, Any]]:
+    """The catalogue with one asset's record count and last test date per test."""
+    counts = {t["testId"]: t for t in availability(asset, date_from, date_to)}
+    items = []
+    for test in catalogue():
+        got = counts.get(test["testId"], {})
+        items.append({**test,
+                      "available": got.get("available", False),
+                      "records": got.get("records", 0),
+                      "lastTested": got.get("lastTested")})
+    return items
 
 
 # --------------------------------------------------------------------------

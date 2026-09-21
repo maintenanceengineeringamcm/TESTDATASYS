@@ -114,3 +114,6 @@ temp/
 *.bak
 *.orig
 *.rej
+
+# Tomms slim backups made by db-tools/create_tomms_slim.bat
+db-tools/backup/

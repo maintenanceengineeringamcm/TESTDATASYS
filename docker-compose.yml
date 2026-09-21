@@ -1,0 +1,127 @@
+# Transformer Asset Health Index & DGA Analysis - full stack in Docker.
+#
+#   docker compose up -d --build        build and start everything
+#   docker compose logs -f db-init      watch the database restore
+#   docker compose ps                   status
+#
+# All settings come from .env (copy .env.example). See DEPLOYMENT_DOCKER.md.
+#
+#   browser ──► app :5000 (API + UI) ──► config-service :5001 (internal only)
+#                  │
+#                  └──► mssql :1433  (CEB_TRANSMISSION + Tomms_CEBT_HI)
+#   scheduler ── 08:00 daily snapshot ──► mssql, shares the snapshot volume
+
+name: hi-analysis
+
+x-app-env: &app-env
+  TZ: ${TZ:-Asia/Colombo}
+  HI_DB_SERVER: mssql
+  HI_DB_NAME: ${HI_DB_NAME:-CEB_TRANSMISSION}
+  HI_DB_TRUSTED: "false"
+  HI_DB_USER: ${HI_DB_USER:-hi_app}
+  HI_DB_PASSWORD: ${HI_DB_PASSWORD:?set HI_DB_PASSWORD in .env}
+  # Both databases live on the one SQL Server container now.
+  HI_TOMMS_DB_SERVER: mssql
+  HI_TOMMS_DB_NAME: ${HI_TOMMS_DB_NAME:-Tomms_CEBT_HI}
+  HI_TOMMS_DB_TRUSTED: "false"
+  HI_TOMMS_DB_USER: ${HI_DB_USER:-hi_app}
+  HI_TOMMS_DB_PASSWORD: ${HI_DB_PASSWORD}
+  HI_CONFIG_SERVICE_URL: http://config-service:5001
+  HI_SNAPSHOT_TOKEN: ${HI_SNAPSHOT_TOKEN:-}
+
+services:
+  mssql:
+    # 2025 because the Tomms backups come from a SQL Server 2025 instance, and
+    # a backup cannot be restored onto an older version. CEB_TRANSMISSION (2022)
+    # restores onto 2025 without change.
+    image: mcr.microsoft.com/mssql/server:2025-latest
+    container_name: hi-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: ${MSSQL_PID:-Express}
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+      MSSQL_MEMORY_LIMIT_MB: ${SQL_MEMORY_MB:-4096}
+      TZ: ${TZ:-Asia/Colombo}
+    volumes:
+      - mssql-data:/var/opt/mssql
+      - ${BACKUP_DIR:?set BACKUP_DIR in .env}:/var/opt/mssql/backup:ro
+    ports:
+      # For SSMS / Azure Data Studio from your PC. Remove this block to keep
+      # SQL Server reachable only by the application.
+      - "${SQL_PORT:-1433}:1433"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/1433'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  db-init:
+    # One-shot: restores the .bak files (first run only) and creates the
+    # read-only login. Exits when done; the app waits for it.
+    build: { context: ., dockerfile: docker/Dockerfile }
+    image: hi-analysis-app:latest
+    container_name: hi-db-init
+    command: ["python", "/app/docker/restore_databases.py"]
+    environment:
+      HI_DB_SERVER: mssql
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      HI_DB_USER: ${HI_DB_USER:-hi_app}
+      HI_DB_PASSWORD: ${HI_DB_PASSWORD}
+      HI_REQUIRED_DATABASES: ${HI_DB_NAME:-CEB_TRANSMISSION},${HI_TOMMS_DB_NAME:-Tomms_CEBT_HI}
+    volumes:
+      - ${BACKUP_DIR}:/backups:ro
+    depends_on:
+      mssql: { condition: service_healthy }
+    restart: "no"
+
+  config-service:
+    image: hi-analysis-app:latest
+    container_name: hi-config
+    working_dir: /app/config-service
+    command: ["python", "app.py"]
+    environment:
+      TZ: ${TZ:-Asia/Colombo}
+    volumes:
+      - config-data:/data/config
+    depends_on:
+      db-init: { condition: service_completed_successfully }
+    restart: unless-stopped
+    # No ports: only the app talks to it, over the internal network.
+
+  app:
+    image: hi-analysis-app:latest
+    container_name: hi-app
+    environment:
+      <<: *app-env
+      HI_THREADS: ${HI_THREADS:-8}
+    volumes:
+      - snapshots:/app/backend/snapshots
+      - logs:/app/backend/logs
+    ports:
+      - "${APP_PORT:-5000}:5000"
+    depends_on:
+      db-init: { condition: service_completed_successfully }
+      config-service: { condition: service_started }
+    restart: unless-stopped
+
+  scheduler:
+    image: hi-analysis-app:latest
+    container_name: hi-scheduler
+    command: ["python", "/app/docker/scheduler.py"]
+    environment:
+      <<: *app-env
+      SNAPSHOT_TIME: ${SNAPSHOT_TIME:-08:00}
+    volumes:
+      - snapshots:/app/backend/snapshots
+      - logs:/app/backend/logs
+    depends_on:
+      db-init: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+volumes:
+  mssql-data:     # SQL Server system + restored databases (the big one)
+  snapshots:      # precomputed health indices + manufacture-year cache
+  config-data:    # engineer-edited score bands and weights
+  logs:

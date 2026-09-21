@@ -329,6 +329,12 @@ export interface DgaManualSample {
 export interface DgaStatusReport {
   generatedAt: string
   asset: string
+  /** CMMS description of the unit, e.g. 'Three Phase Power Transformer 02'. */
+  assetName?: string | null
+  /** CMMS name of the substation, e.g. 'Kerawalapitiya GSS'. */
+  siteName?: string | null
+  /** The substation's code, the first segment of the asset number. */
+  siteCode?: string | null
   /** 'stored' = read from CEB_DGA_DATA, 'manual' = classified from typed-in values. */
   source?: 'stored' | 'manual'
   status: DgaStatusResult

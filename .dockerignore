@@ -1,0 +1,27 @@
+# Keep the build context small and free of machine-local state.
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+.git
+.env
+.env.*
+
+frontend/node_modules
+frontend/dist
+frontend/tsconfig.tsbuildinfo
+
+# Runtime state lives in Docker volumes, not in the image.
+backend/snapshots/*.db
+backend/snapshots/*.db-*
+backend/snapshots/*.json
+backend/logs
+config-service/*.db
+config-service/*.db-*
+
+# Large local files that are not part of the application.
+sample-reports
+*.xlsx
+*.csv
+exports
+backups
+db-tools/backup

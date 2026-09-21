@@ -493,6 +493,26 @@ def children(parent: str | None = None) -> list[dict[str, Any]]:
     return [_public(c) for c in node["children"]] if node else []
 
 
+def subtree(asset_no: str | None = None, depth: int = 1) -> list[dict[str, Any]] | None:
+    """Nested nodes `depth` levels deep, starting at `asset_no` or at the roots.
+
+    `depth=0` returns the starting node(s) alone. Every node carries `children`
+    - empty past the depth limit, with `childCount` still saying what is there -
+    so a caller can tell "a leaf" from "not expanded". Returns None for an
+    unknown `asset_no`.
+    """
+    def expand(node: dict[str, Any], remaining: int) -> dict[str, Any]:
+        out = _public(node)
+        out["children"] = ([expand(c, remaining - 1) for c in node["children"]]
+                           if remaining > 0 else [])
+        return out
+
+    if not _norm(asset_no):
+        return [expand(n, depth) for n in tree()["roots"]]
+    start = get(asset_no)
+    return [expand(start, depth)] if start else None
+
+
 def ancestors(asset_no: str) -> list[dict[str, Any]]:
     """Root-first breadcrumb, inclusive of the node itself (doc 6.4)."""
     node, trail, guard = get(asset_no), [], 0

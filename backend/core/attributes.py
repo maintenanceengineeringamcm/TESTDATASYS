@@ -163,6 +163,54 @@ def normalise(asset_no: str) -> str:
     return (asset_no or "").strip().upper()
 
 
+_NAME_SQL = """
+SELECT LTRIM(RTRIM(m.ast_mst_asset_no))        AS asset_no,
+       LTRIM(RTRIM(m.ast_mst_asset_shortdesc)) AS short_desc
+FROM   ast_mst m
+WHERE  m.site_cd = ?
+  AND  LTRIM(RTRIM(m.ast_mst_asset_no)) IN (?, ?)
+"""
+
+
+def asset_naming(asset_no: str) -> dict[str, str | None]:
+    """What the CMMS calls this asset, and the substation it stands in.
+
+    Returns ``{"assetName", "siteName", "siteCode"}``, any of which may be None
+    when the CMMS has no row or is unreachable - a report still prints, named by
+    its asset number alone, exactly as it did before.
+
+    Two targeted lookups rather than the navigator's tree: naming one asset does
+    not justify building 24,000 nodes, which costs the better part of a minute
+    on a cold process. `'N/A'` arrives as a string here, not a null (integration
+    doc 9.3), so it is normalised away rather than printed as a name.
+    """
+    key = normalise(asset_no)
+    site = key.split("/")[0]
+
+    def build() -> dict[str, str | None]:
+        blank: dict[str, str | None] = {"assetName": None, "siteName": None,
+                                        "siteCode": site or None}
+        if not (key and tomms_configured()):
+            return blank
+        try:
+            rows = db.tomms_query(_NAME_SQL, (Config.TOMMS_SITE_CD, key, site))
+        except db.DatabaseError as exc:
+            log.warning("asset name lookup failed for %s: %s", key, exc)
+            return blank
+        found: dict[str, str] = {}
+        for row in rows:
+            code = (row.get("asset_no") or "").strip().upper()
+            desc = (row.get("short_desc") or "").strip()
+            if code and desc and desc != "N/A":
+                found[code] = desc
+        return {"assetName": found.get(key), "siteName": found.get(site),
+                "siteCode": site or None}
+
+    # Names change when an engineer renames plant in the CMMS, which is rare;
+    # an hour of staleness is cheaper than a round trip on every report.
+    return db.cached(f"attributes:name:{key}", build, ttl=3600)
+
+
 def parent_of_oltc(asset_no: str) -> str | None:
     """The transformer an OLTC asset number hangs off, or None if not an OLTC.
 

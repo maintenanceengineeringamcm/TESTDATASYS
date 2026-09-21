@@ -12,20 +12,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { GAS_COLORS } from './gasColors'
 
-// One categorical ramp reused everywhere, so a gas keeps its colour across
-// every chart in the app.
-export const GAS_COLORS: Record<string, string> = {
-  H2: '#1E72BC',
-  CH4: '#E8833A',
-  CO: '#2E9E6B',
-  CO2: '#C0504D',
-  C2H4: '#8064A2',
-  C2H6: '#9C6B4E',
-  C2H2: '#D64545',
-  O2: '#7F8C99',
-  N2: '#B0A63C',
-}
+// Defined in its own module so the PDF builder can share it; re-exported here
+// because every chart in the app already imports it from this file.
+export { GAS_COLORS } from './gasColors'
 
 const axisStyle = { fontSize: 11, fill: '#64748B' }
 

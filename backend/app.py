@@ -10,6 +10,7 @@ from urllib.parse import quote
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
+import api_v1
 import db
 from config import Config
 from core import assets as assets_mod
@@ -24,6 +25,8 @@ log = logging.getLogger("hi.api")
 
 app = Flask(__name__)
 CORS(app, origins=Config.CORS_ORIGINS)
+# Versioned public API with Swagger UI at /apidocs/.
+api_v1.init_app(app)
 
 OPEN_FROM = readers.OPEN_FROM
 OPEN_TO = readers.OPEN_TO
@@ -698,15 +701,7 @@ def history_tests():
         return jsonify({"asset": None, "items": history.catalogue()})
 
     date_from, date_to = _range()
-    counts = {t["testId"]: t
-              for t in readers.availability(asset, date_from, date_to)}
-    items = []
-    for test in history.catalogue():
-        got = counts.get(test["testId"], {})
-        items.append({**test,
-                      "available": got.get("available", False),
-                      "records": got.get("records", 0),
-                      "lastTested": got.get("lastTested")})
+    items = history.asset_summary(asset, date_from, date_to)
     return jsonify({"asset": asset, "items": items,
                     "dateFrom": date_from, "dateTo": date_to})
 

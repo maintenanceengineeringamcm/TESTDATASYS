@@ -1,4 +1,11 @@
-import { Download, FileText, Pentagon as PentagonIcon, Triangle as TriangleIcon, X } from 'lucide-react'
+import {
+  Download,
+  FileText,
+  LineChart as LineChartIcon,
+  Pentagon as PentagonIcon,
+  Triangle as TriangleIcon,
+  X,
+} from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { DgaStatusReport } from '../types'
 
@@ -19,6 +26,7 @@ export default function DgaPdfExportDialog({
   /** The full report payload - fetched on demand where the caller lacks it. */
   loadReport: () => Promise<DgaStatusReport>
 }) {
+  const [trends, setTrends] = useState(false)
   const [triangles, setTriangles] = useState(false)
   const [pentagons, setPentagons] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -50,7 +58,7 @@ export default function DgaPdfExportDialog({
         const { buildDuvalExtras } = await import('../lib/duvalPdfCharts')
         extras = await buildDuvalExtras(report, { triangles, pentagons })
       }
-      exportDgaStatusPdf(report, extras)
+      exportDgaStatusPdf(report, extras, { trends })
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not build the PDF.')
@@ -60,6 +68,13 @@ export default function DgaPdfExportDialog({
   }
 
   const options = [
+    {
+      checked: trends,
+      set: setTrends,
+      icon: LineChartIcon,
+      title: 'Gas trend charts',
+      hint: 'Three line charts over the sample history: H2 with C2H2, the three hydrocarbons together, and all five fault gases in one.',
+    },
     {
       checked: triangles,
       set: setTriangles,

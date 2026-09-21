@@ -1,5 +1,6 @@
 import jsPDF from 'jspdf'
 import autoTable, { type RowInput } from 'jspdf-autotable'
+import { GAS_COLORS } from '../charts/gasColors'
 import type { DgaLimit, DgaStatusReport, PentagonResult, TriangleResult } from '../types'
 
 /**
@@ -73,6 +74,157 @@ const percentText = (p: Record<string, number> | null | undefined) =>
 function duvalNeeds(doc: jsPDF, charts: PdfChart[]): number {
   const w = (doc.internal.pageSize.getWidth() - MARGIN * 2 - 6) / 2
   return 20 + Math.max(0, ...charts.map((c) => w * c.aspect))
+}
+
+/** Optional sections the engineer ticked that need no extra data. */
+export interface DgaPdfOptions {
+  /** Section 7: the three gas trend charts. */
+  trends?: boolean
+}
+
+/**
+ * The trend charts, in print order.
+ *
+ * Split the way an engineer reads them: hydrogen with acetylene says
+ * "electrical fault", the three hydrocarbons together say "thermal fault", and
+ * the combined chart shows which of the five is actually moving. CO and CO2 are
+ * left out of all three - they run in the thousands and would flatten the rest.
+ */
+export const TREND_CHARTS: { title: string; gases: string[] }[] = [
+  { title: 'H2 and C2H2 - electrical fault gases', gases: ['H2', 'C2H2'] },
+  { title: 'CH4, C2H6 and C2H4 - thermal fault gases', gases: ['CH4', 'C2H6', 'C2H4'] },
+  { title: 'All five fault gases', gases: ['H2', 'CH4', 'C2H6', 'C2H4', 'C2H2'] },
+]
+
+/** Height of one chart block: title and legend, plot, then date labels. */
+const TREND_H = 56
+
+const toNumber = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v) ? v : null
+
+/**
+ * Axis ticks on 1/2/2.5/5 x 10^n.
+ *
+ * Gas concentrations span three orders of magnitude between assets, so the
+ * divisions are derived from the data rather than fixed - but they still have
+ * to land on numbers an engineer would write down, not on 137.4 ppm.
+ */
+function niceTicks(max: number): number[] {
+  if (!(max > 0)) return [0, 1]
+  const target = max / 4
+  const mag = 10 ** Math.floor(Math.log10(target))
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= target) ?? 10 * mag
+  const ticks: number[] = []
+  // The top tick has to cover the highest reading, not merely approach it:
+  // 308 ppm under a 300 ppm top prints its point above the axis, outside the
+  // plot, where it reads as a stray mark rather than a sample.
+  for (let t = 0; ; t += step) {
+    ticks.push(Number(t.toFixed(6)))
+    if (t >= max) break
+  }
+  return ticks
+}
+
+const tickLabel = (v: number) => (v >= 10 || v === 0 ? v.toFixed(0) : String(v))
+
+/**
+ * One line chart, drawn as vectors rather than a rasterised image.
+ *
+ * The Duval diagrams are photographs of a fixed diagram, so a PNG is honest
+ * there. A trend chart is just the sample table plotted, and drawing it with
+ * jsPDF's own lines keeps the dates and ppm values as crisp text at any zoom -
+ * which matters on a report that gets printed, signed and photocopied.
+ *
+ * Returns the y below the block.
+ */
+function trendChart(
+  doc: jsPDF,
+  y: number,
+  rows: Record<string, number | string | null>[],
+  gases: string[],
+  title: string,
+): number {
+  const pageW = doc.internal.pageSize.getWidth()
+  const pageH = doc.internal.pageSize.getHeight()
+  if (y + TREND_H > pageH - MARGIN) {
+    doc.addPage()
+    y = MARGIN + 6
+  }
+
+  doc.setFont('helvetica', 'bold').setFontSize(8).setTextColor(INK)
+  doc.text(title, MARGIN, y)
+
+  // Legend on the title line - a chart this short cannot spare a row for it.
+  let lx = MARGIN + doc.getTextWidth(title) + 6
+  doc.setFont('helvetica', 'normal').setFontSize(6)
+  for (const gas of gases) {
+    const color = GAS_COLORS[gas] ?? INK_MUTED
+    doc.setDrawColor(color).setLineWidth(0.7)
+    doc.line(lx, y - 0.9, lx + 4, y - 0.9)
+    doc.setTextColor(INK)
+    doc.text(gas, lx + 5, y)
+    lx += 5 + doc.getTextWidth(gas) + 4
+  }
+
+  const plotX = MARGIN + 13
+  const plotY = y + 3.5
+  const plotW = pageW - MARGIN - 2 - plotX
+  const plotH = TREND_H - 15
+
+  const series = gases.map((gas) => ({
+    gas,
+    points: rows
+      .map((row, i) => ({ i, v: toNumber(row[gas]) }))
+      .filter((p): p is { i: number; v: number } => p.v !== null),
+  }))
+  const values = series.flatMap((s) => s.points.map((p) => p.v))
+
+  const ticks = niceTicks(Math.max(0, ...values))
+  const top = ticks[ticks.length - 1] || 1
+  const yOf = (v: number) => plotY + plotH - (v / top) * plotH
+  const n = rows.length
+  const xOf = (i: number) => (n < 2 ? plotX + plotW / 2 : plotX + (i / (n - 1)) * plotW)
+
+  doc.setDrawColor(LINE).setLineWidth(0.1)
+  doc.setFont('helvetica', 'normal').setFontSize(5.5).setTextColor(INK_MUTED)
+  for (const t of ticks) {
+    doc.line(plotX, yOf(t), plotX + plotW, yOf(t))
+    doc.text(tickLabel(t), plotX - 1.5, yOf(t) + 0.8, { align: 'right' })
+  }
+  doc.text('ppm', MARGIN, plotY - 1)
+
+  doc.setDrawColor('#B9CEE4').setLineWidth(0.25)
+  doc.line(plotX, plotY, plotX, plotY + plotH)
+  doc.line(plotX, plotY + plotH, plotX + plotW, plotY + plotH)
+
+  if (!values.length) {
+    doc.setFont('helvetica', 'normal').setFontSize(7).setTextColor(INK_MUTED)
+    doc.text('No values recorded for these gases.', plotX + plotW / 2, plotY + plotH / 2, {
+      align: 'center',
+    })
+    return y + TREND_H + 4
+  }
+
+  // Dates from the right, so the newest sample is always labelled and the
+  // labels never collide with it.
+  const step = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(plotW / 17))))
+  doc.setFont('helvetica', 'normal').setFontSize(5).setTextColor(INK_MUTED)
+  for (let i = n - 1; i >= 0; i -= step) {
+    doc.text(String(rows[i].date ?? ''), xOf(i), plotY + plotH + 3.4, { align: 'center' })
+  }
+
+  for (const s of series) {
+    const color = GAS_COLORS[s.gas] ?? INK_MUTED
+    doc.setDrawColor(color).setFillColor(color).setLineWidth(0.45)
+    // Gaps are bridged rather than broken, the same as the on-screen chart:
+    // a gas missing from one sheet is a missing reading, not a return to zero.
+    for (let k = 1; k < s.points.length; k++) {
+      doc.line(xOf(s.points[k - 1].i), yOf(s.points[k - 1].v), xOf(s.points[k].i), yOf(s.points[k].v))
+    }
+    for (const p of s.points) doc.circle(xOf(p.i), yOf(p.v), 0.55, 'F')
+  }
+
+  return y + TREND_H + 4
 }
 
 function limitText(limit: DgaLimit): string {
@@ -159,25 +311,41 @@ function bullets(doc: jsPDF, y: number, items: string[], size = 8.5): number {
  * colour here as on screen — the scale is defined in one place and the PDF
  * borrows it rather than restating it.
  */
-export function buildDgaStatusPdf(report: DgaStatusReport, extras?: DuvalPdfExtras): jsPDF {
+export function buildDgaStatusPdf(
+  report: DgaStatusReport,
+  extras?: DuvalPdfExtras,
+  options?: DgaPdfOptions,
+): jsPDF {
   const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' })
   const pageW = doc.internal.pageSize.getWidth()
   const s = report.status
 
   // ---- Masthead ----------------------------------------------------------
+  // The asset number identifies the unit; the CMMS names say where it stands,
+  // which is what a reader recognises. The number stays the headline because it
+  // is what every other system keys on - the names sit under it, and the band
+  // keeps its old height when the CMMS has no name to give.
+  const nameLine = [report.siteName, report.assetName].filter(Boolean).join(' — ')
+  const bandH = nameLine ? 31 : 26
   doc.setFillColor(BRAND)
-  doc.rect(0, 0, pageW, 26, 'F')
+  doc.rect(0, 0, pageW, bandH, 'F')
   doc.setFont('helvetica', 'bold').setFontSize(14).setTextColor('#FFFFFF')
   doc.text('DGA Status Report', MARGIN, 11)
   doc.setFont('helvetica', 'normal').setFontSize(8)
   doc.text('Dissolved gas analysis — status assessment, IEEE C57.104-2019', MARGIN, 16.5)
   doc.setFont('helvetica', 'bold').setFontSize(9)
   doc.text(report.asset, MARGIN, 22)
+  if (nameLine) {
+    doc.setFont('helvetica', 'normal').setFontSize(8.5)
+    // Clipped to the band rather than wrapped: a long CMMS description must not
+    // push the status line down onto the header facts.
+    doc.text((doc.splitTextToSize(nameLine, pageW - MARGIN * 2) as string[])[0], MARGIN, 27.5)
+  }
 
   // The status is set below the masthead rather than inside it: the band is a
   // dark brand blue, and the status colours are chosen to read on white, so a
   // red or amber verdict printed on the band would be barely legible.
-  let y = 33
+  let y = bandH + 7
   doc.setFont('helvetica', 'bold').setFontSize(13).setTextColor(s.color)
   doc.text(`${s.statusLabel} - ${s.verdict}`, MARGIN, y)
   y += 8
@@ -387,8 +555,37 @@ export function buildDgaStatusPdf(report: DgaStatusReport, extras?: DuvalPdfExtr
   })
   y = cursorY(doc) + 6
 
-  // ---- 7+. Duval diagrams, when requested -------------------------------
+  // ---- 7. Gas trend charts, when requested ------------------------------
   let section = 7
+
+  if (options?.trends) {
+    const rows = report.sampleTable ?? []
+    // The whole block is claimed at once, so the three charts stay on one page:
+    // they are read against each other, and a chart overleaf cannot be compared
+    // with the two above it.
+    y = heading(doc, y, section++, 'Gas trend charts',
+      12 + TREND_CHARTS.length * (TREND_H + 4))
+    y = paragraph(
+      doc, y,
+      rows.length
+        ? `Concentration in ppm at each of the ${rows.length} samples listed in section 6`
+          + `${rows.length > 1 ? `, ${rows[0].date} to ${rows[rows.length - 1].date}` : ''}. `
+          + 'Samples are spaced evenly along the axis, not by elapsed time, so the '
+          + 'shape shows the order of the readings rather than their rate - the '
+          + 'fitted rates are in section 4.'
+        : 'There are no samples on record, so there is nothing to plot.',
+      { size: 7.5, color: INK_MUTED },
+    )
+    if (rows.length) {
+      y += 2
+      for (const chart of TREND_CHARTS) y = trendChart(doc, y, rows, chart.gases, chart.title)
+      y += 2
+    } else {
+      y += 5
+    }
+  }
+
+  // ---- 8+. Duval diagrams, when requested -------------------------------
   const duvalSample = extras
     ? `Diagnosed on the DGA sample of ${extras.sampleDate ?? 'unknown date'}: ${DUVAL_GASES.map(
         (g) => `${g} ${extras.gases[g] ?? 0}`,
@@ -465,7 +662,8 @@ export function buildDgaStatusPdf(report: DgaStatusReport, extras?: DuvalPdfExtr
     doc.line(MARGIN, pageH - 10, pageW - MARGIN, pageH - 10)
     doc.setFont('helvetica', 'normal').setFontSize(6.5).setTextColor(INK_MUTED)
     doc.text(
-      `${report.asset} — DGA status ${s.statusLabel} — generated ${report.generatedAt} by the Transformer Asset Health Index & Analysis system`,
+      `${report.asset}${report.siteName ? ` (${report.siteName})` : ''} — DGA status ${s.statusLabel}`
+        + ` — generated ${report.generatedAt} by the Transformer Asset Health Index & Analysis system`,
       MARGIN,
       pageH - 6,
     )
@@ -482,6 +680,10 @@ export function dgaStatusPdfName(report: DgaStatusReport): string {
 }
 
 /** Render the report and hand the browser a file. */
-export function exportDgaStatusPdf(report: DgaStatusReport, extras?: DuvalPdfExtras): void {
-  buildDgaStatusPdf(report, extras).save(dgaStatusPdfName(report))
+export function exportDgaStatusPdf(
+  report: DgaStatusReport,
+  extras?: DuvalPdfExtras,
+  options?: DgaPdfOptions,
+): void {
+  buildDgaStatusPdf(report, extras, options).save(dgaStatusPdfName(report))
 }
