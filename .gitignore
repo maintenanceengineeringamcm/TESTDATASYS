@@ -111,7 +111,7 @@ sample-reports/
 tmp/
 temp/
 *.tmp
-*.bak
+
 *.orig
 *.rej
 
