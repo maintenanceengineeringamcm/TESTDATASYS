@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-const BASE = '/api'
+// BASE_URL is the sub-path the build was made for ('/' by default, or e.g.
+// '/testanalysis/' with `vite build --base=/testanalysis/`), so the API is
+// reached through the same reverse-proxy prefix as the page.
+export const BASE = `${import.meta.env.BASE_URL}api`
 
 export class ApiError extends Error {
   status: number

@@ -4,6 +4,7 @@ import { Outlet } from 'react-router-dom'
 import { useApi } from '../api'
 import HierarchyPanel from './HierarchyPanel'
 import IconRail from './IconRail'
+import SectionTabs from './SectionTabs'
 import { ScopeProvider, useScope } from './ScopeContext'
 
 function ConnectionPill() {
@@ -166,6 +167,7 @@ function Shell() {
 
         {/* Content scrolls on its own so the two sidebars stay put. */}
         <main className="min-w-0 flex-1 overflow-y-auto p-4 lg:p-6">
+          <SectionTabs />
           <Outlet />
         </main>
       </div>

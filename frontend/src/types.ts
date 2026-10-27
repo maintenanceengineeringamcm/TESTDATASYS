@@ -120,6 +120,26 @@ export interface HIDetail {
   message: string
   configAudit?: ConfigAudit
   storedHistory?: StoredHI[]
+  /** Index before the DGA correction; equals healthIndex when none was applied. */
+  healthIndexUncorrected?: number | null
+  dgaCorrection?: DgaCorrection | null
+}
+
+/** IEEE C57.104 status-based correction applied to the final index. */
+export interface DgaCorrection {
+  enabled: boolean
+  applied: boolean
+  factors: Record<string, number>
+  status: 1 | 2 | 3 | null
+  statusLabel: string | null
+  verdict: string | null
+  color: string | null
+  bg: string | null
+  latestSample: string | null
+  factor: number
+  hiBefore: number | null
+  hiAfter: number | null
+  message: string
 }
 
 export interface StoredHI {
@@ -211,6 +231,40 @@ export interface AssetTrend {
   excludedGases: string[]
   message: string
   gases: GasTrend[]
+}
+
+/** An oil filtration / degassing point in a transformer's DGA history. */
+export interface FilterPoint {
+  id: string                       // "auto:<date>" or "manual:<stored id>"
+  date: string                     // first sample after filtration (detected) or the marked date
+  source: 'detected' | 'manual'
+  rejected: boolean
+  rejectionId?: number | null
+  note: string | null
+  previousSample: string | null
+  droppedGases: string[]
+  gases: Record<string, { before: number | null; after: number | null }>
+  createdBy?: string
+  createdAt?: string
+}
+
+/** Which samples the health index scores DGA level and trend on. */
+export interface FilterWindow {
+  enabled: boolean
+  fromDate: string | null        // inclusive
+  beforeDate: string | null      // exclusive
+  samplesUsed: number
+  skippedPoints: { date: string; samplesAfter: number }[]
+  minSamplesAfter: number
+  reason: string
+}
+
+export interface FilterPoints {
+  asset: string
+  points: FilterPoint[]
+  rule: string
+  hiWindow: FilterWindow
+  samples: number
 }
 
 /* --------------------------------------------------------------------------

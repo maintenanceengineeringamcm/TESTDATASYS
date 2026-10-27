@@ -21,7 +21,7 @@ from typing import Any, Callable
 import db
 from config import Config
 from core import assets as assets_mod
-from core import dga_trend, readers, scoring
+from core import dga_filter, dga_status, dga_trend, readers, scoring
 
 log = logging.getLogger(__name__)
 
@@ -71,46 +71,93 @@ def _candidates(reading: readers.Reading | None) -> list[dict[str, Any]]:
     return [c.as_dict() for c in reading.candidates] if reading else []
 
 
-def _dga_level(asset: str, date_from: str, date_to: str) -> dict[str, Any] | None:
-    """DGA gas-level component: per-gas bands -> weighted index -> final band.
+def _window_note(window: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The filter-window facts shown with a DGA criterion, or None for full history."""
+    if not window or (window["fromDate"] is None and not window["skippedPoints"]):
+        return None
+    return {k: window[k] for k in ("fromDate", "beforeDate", "samplesUsed",
+                                   "skippedPoints", "minSamplesAfter", "reason")}
 
-    Each gas is scored against **its own** field. The legacy code compared every
-    gas against `H2ppm`, which is a copy/paste defect; `DGA_PER_GAS_OWN_FIELD`
-    restores it only if a sign-off ever demands the old numbers.
+
+def _dga_window(asset: str) -> dict[str, Any] | None:
+    """Samples DGA level and trend are scored on, given any oil filtration points."""
+    if not Config.DGA_FILTER_WINDOW:
+        return None
+    try:
+        return dga_filter.analysis_window(asset)
+    except Exception as exc:                          # the window must not cost the HI
+        log.warning("DGA filter window failed for %s: %s", asset, exc)
+        return None
+
+
+def _dga_level(asset: str, date_from: str, date_to: str,
+               window: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """DGA gas-level component - the source logic (GetDGALevScore), with each
+    gas banded on its own value:
+
+    1. Newest CEB_DGA_DATA record (by DateTested) for the asset within the
+       date range, used as it is even when gases are blank.
+    2. Each gas: its own ppm value against its own band table, score = band
+       Value where RangeFrom < x < RangeTo (both ends exclusive); 0 when no
+       band matches or the value is blank. (The source text used H2ppm for
+       every gas; HI_DGA_PER_GAS_OWN_FIELD=false restores that.)
+    3. Latest DGA weight set; every gas's weight counts, scored or not.
+    4. dgai = sum(score x weight) / sum(weight).
+    5. Final score = DGA band Value where RangeFrom <= dgai < RangeTo; 0 if none.
+
+    With an oil filtration in the history, step 1 only looks at the side of the
+    filter point that `window` selects (see dga_filter.choose_window).
     """
-    sample = readers.read_dga_sample(asset, date_from, date_to)
+    note = _window_note(window)
+    sample = readers.read_dga_level_sample(
+        asset, date_from, date_to,
+        sampled_from=note["fromDate"] if note else None,
+        sampled_before=note["beforeDate"] if note else None)
     if not sample:
         return None
     gases = sample["gases"]
     gas_weights = scoring.weight_sets().get("DGA", {})
+
+    # Conditions are taken on the table as stored: RangeFrom < x < RangeTo can
+    # never hold for a row stored highest-first, so such a row never matches.
+    def strict_band(x: float | None, band_name: str) -> float:
+        if x is None:
+            return 0.0
+        score = 0.0
+        for b in scoring.bands_for("TR", band_name):
+            if not b.descending and b.low < x < b.high:
+                score = b.score
+        return score
 
     per_gas = []
     score_sum = 0.0
     weight_sum = 0.0
     for gas, band_name in scoring.DGA_GAS_BANDS.items():
         raw = gases.get(gas)
-        if raw is None:
-            continue
-        compare_value = raw if Config.DGA_PER_GAS_OWN_FIELD else (gases.get("H2") or 0.0)
-        bands = scoring.bands_for("TR", band_name)
-        gas_score = scoring.lookup(compare_value, bands)
-        if gas_score is None:
-            continue
+        compare_value = raw if Config.DGA_PER_GAS_OWN_FIELD else gases.get("H2")
+        gas_score = strict_band(compare_value, band_name)
         w = gas_weights.get(gas, 0.0)
-        per_gas.append({"gas": gas, "value": raw, "score": gas_score, "weight": w})
+        per_gas.append({"gas": gas, "value": raw, "comparedValue": compare_value,
+                        "score": gas_score, "weight": w})
         score_sum += gas_score * w
         weight_sum += w
 
     if weight_sum <= 0:
         return None
     dgai = score_sum / weight_sum
-    final = scoring.lookup(dgai, scoring.bands_for("TR", "DGA"))
+    final = 0.0
+    for b in scoring.bands_for("TR", "DGA"):
+        if not b.descending and b.low <= dgai < b.high:
+            final = b.score
     # Every gas that fed the index is a candidate, so the workbench can show the
     # full gas set behind the single number.
     candidates = [
         {"label": g["gas"], "value": g["value"], "date": sample["date"],
          "source": "CEB_DGA_DATA", "used": False,
-         "reason": f"score {g['score']:g} x weight {g['weight']:g}"}
+         "reason": (f"score {g['score']:g} x weight {g['weight']:g}"
+                   + (" (blank - scored 0)" if g["comparedValue"] is None else "")
+                   + ("" if g["comparedValue"] is None or g["gas"] == "H2"
+                      or Config.DGA_PER_GAS_OWN_FIELD else " (banded on H2ppm)"))}
         for g in per_gas
     ]
     return {
@@ -118,15 +165,18 @@ def _dga_level(asset: str, date_from: str, date_to: str) -> dict[str, Any] | Non
         "score": final,
         "date": sample["date"],
         "source": "CEB_DGA_DATA",
-        "detail": {"gasIndex": round(dgai, 4), "perGas": per_gas},
+        "detail": {"gasIndex": round(dgai, 4), "perGas": per_gas,
+                   **({"filterWindow": note} if note else {})},
         "candidates": candidates,
         "mode": "blend",
         "rule": (f"weighted index of {len(per_gas)} gases "
-                 f"(sum of score x weight / {weight_sum:g}), then banded"),
+                 f"(sum of score x weight / {weight_sum:g}), then banded"
+                 + (f" · {note['reason']}" if note else "")),
     }
 
 
-def _dga_trend_component(asset: str) -> dict[str, Any] | None:
+def _dga_trend_component(asset: str,
+                         window: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """DGA trend component, fed by the IEEE C57.104 trend engine.
 
     Marked manual in the automation spec, but the trend value is computable and
@@ -134,8 +184,13 @@ def _dga_trend_component(asset: str) -> dict[str, Any] | None:
     (0.69, 0.61, 0.44...) rather than the discrete band scores, which is exactly
     what the trend engine produces. Scored on full sample history, since
     clipping the range changes which samples form the last-three window.
+
+    An oil filtration splits that history: `window` holds the samples on the
+    side of the filter point being scored (see dga_filter.choose_window).
     """
-    result = dga_trend.asset_trend(asset)
+    note = _window_note(window)
+    result = (dga_trend.compute_asset_trend(asset.strip(), window["samples"]) if note
+              else dga_trend.asset_trend(asset))
     if result.get("trend") is None:
         return None
     candidates = [
@@ -153,19 +208,106 @@ def _dga_trend_component(asset: str) -> dict[str, Any] | None:
             "condition": result["condition"],
             "samples": result["samples"],
             "excludedGases": result["excludedGases"],
+            **({"filterWindow": note} if note else {}),
         },
         "candidates": candidates,
         "mode": "blend",
         "rule": (f"weighted mean of {len(candidates)} gas sub scores "
-                 f"(denominator {result['denominator']})"),
+                 f"(denominator {result['denominator']})"
+                 + (f" · {note['reason']}" if note else "")),
     }
+
+
+# DGA correction factor - the share of the final index taken away for each
+# IEEE C57.104-2019 status. Status 3 at 0.7 means the index drops by 70%.
+DGA_CORRECTION_DEFAULTS: dict[int, float] = {1: 0.0, 2: 0.3, 3: 0.7}
+
+
+def parse_correction_factors(raw: dict[Any, Any] | None) -> dict[int, float]:
+    """Status -> factor, defaults filled in for any status not supplied.
+
+    Raises ValueError for a status other than 1/2/3 or a factor outside 0..1.
+    """
+    factors = dict(DGA_CORRECTION_DEFAULTS)
+    for key, value in (raw or {}).items():
+        try:
+            status = int(key)
+        except (TypeError, ValueError):
+            raise ValueError(f"unknown DGA status '{key}'") from None
+        if status not in factors:
+            raise ValueError(f"unknown DGA status '{key}'")
+        if value in (None, ""):
+            continue
+        factor = float(value)
+        if not 0.0 <= factor <= 1.0:
+            raise ValueError(f"factor for status {status} must be between 0 and 1")
+        factors[status] = factor
+    return factors
+
+
+def apply_dga_correction(hi: float | None, status: int | None,
+                         factors: dict[int, float]) -> tuple[float | None, float]:
+    """(corrected HI, factor applied). No status or no index means no change."""
+    if hi is None or status not in factors:
+        return hi, 0.0
+    factor = factors[status]
+    return round(hi * (1.0 - factor), 2), factor
+
+
+def _dga_correction(asset: str, a_type: str, hi: float | None, date_from: str,
+                    date_to: str, factors: dict[int, float],
+                    window: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Classify the asset's DGA and scale the final index by its status factor.
+
+    Transformers only - the IEEE status is defined for transformer oil. An asset
+    with no classifiable DGA keeps its index unchanged and says why. With an oil
+    filtration in the history, the status is classified on the same side of the
+    filter point as DGA level and trend (`window`), so a post-filtration dip
+    cannot hide a Status 3.
+    """
+    out: dict[str, Any] = {
+        "enabled": True, "applied": False, "factors": {str(k): v for k, v in factors.items()},
+        "status": None, "statusLabel": None, "verdict": None, "color": None, "bg": None,
+        "latestSample": None, "factor": 0.0, "hiBefore": hi, "hiAfter": hi, "message": "",
+    }
+    if a_type != "TR":
+        out["message"] = "DGA correction applies to transformers only."
+        return out
+    note = _window_note(window)
+    try:
+        if note:
+            age, _ = dga_status._age_for(asset.strip())
+            st = dga_status.classify(window["samples"], age, asset.strip())
+        else:
+            st = dga_status.asset_status(asset, date_from, date_to)
+    except Exception as exc:                          # status must not kill the HI
+        log.warning("DGA status failed for %s: %s", asset, exc)
+        out["message"] = "DGA status could not be determined."
+        return out
+    out.update(status=st.get("status"), statusLabel=st.get("statusLabel"),
+               verdict=st.get("verdict"), color=st.get("color"), bg=st.get("bg"),
+               latestSample=st.get("latestSample"))
+    if st.get("status") is None:
+        out["message"] = st.get("reason") or "No DGA sample to classify - index unchanged."
+        return out
+    if hi is None:
+        out["message"] = "No health index to correct."
+        return out
+    corrected, factor = apply_dga_correction(hi, st["status"], factors)
+    out.update(applied=True, factor=factor, hiAfter=corrected,
+               message=(f"{st['statusLabel']}: index reduced by {factor * 100:g}%"
+                        if factor else f"{st['statusLabel']}: no correction")
+               + (f" (status on {note['reason']})" if note else ""),
+               filterWindow=note)
+    return out
 
 
 def compute(asset_number: str, date_from: str = OPEN_FROM, date_to: str = OPEN_TO,
             manual: dict[str, float] | None = None,
             asset_type: str | None = None,
             selected: list[str] | None = None,
-            manual_age: float | None = None) -> dict[str, Any]:
+            manual_age: float | None = None,
+            dga_correction: dict[int, float] | None = None) -> dict[str, Any]:
     """Compute the health index for one asset.
 
     `selected` restricts the calculation to a chosen set of criteria - the
@@ -173,6 +315,10 @@ def compute(asset_number: str, date_from: str = OPEN_FROM, date_to: str = OPEN_T
     alone. Weights re-normalise over whatever survives, so the index always
     lands on 0..100. `None` means every criterion with data, which is the
     automatic behaviour.
+
+    `dga_correction` (status -> factor) turns on the DGA correction: the final
+    index is multiplied by (1 - factor) for the transformer's IEEE C57.104
+    status. `None` leaves the index uncorrected, as the automatic sweep does.
     """
     asset_number = (asset_number or "").strip()
     manual = manual or {}
@@ -191,6 +337,11 @@ def compute(asset_number: str, date_from: str = OPEN_FROM, date_to: str = OPEN_T
 
     readers_for_type = READERS.get(a_type, {})
     manual_set = scoring.MANUAL_COMPONENTS.get(a_type, set())
+    # Which side of an oil filtration DGA level and trend are scored on - worked
+    # out once, and only for a transformer that needs one of them.
+    dga_window: dict[str, Any] | None = None
+    if a_type == "TR" and not {"DGAL", "DGAT"} <= set(manual):
+        dga_window = _dga_window(asset_number)
     components: list[dict[str, Any]] = []
 
     for code in order:
@@ -223,7 +374,7 @@ def compute(asset_number: str, date_from: str = OPEN_FROM, date_to: str = OPEN_T
             continue
 
         if a_type == "TR" and code == "DGAL":
-            got = _dga_level(asset_number, date_from, date_to)
+            got = _dga_level(asset_number, date_from, date_to, dga_window)
             if got:
                 entry.update(value=got["value"], score=got["score"], date=got["date"],
                              source=got["source"], detail=got["detail"],
@@ -233,7 +384,7 @@ def compute(asset_number: str, date_from: str = OPEN_FROM, date_to: str = OPEN_T
             continue
 
         if a_type == "TR" and code == "DGAT":
-            got = _dga_trend_component(asset_number)
+            got = _dga_trend_component(asset_number, dga_window)
             if got:
                 entry.update(value=got["value"], score=got["score"], date=got["date"],
                              source=got["source"], detail=got["detail"],
@@ -257,7 +408,10 @@ def compute(asset_number: str, date_from: str = OPEN_FROM, date_to: str = OPEN_T
             reading = None
 
         if reading is not None and reading.value is not None:
-            score = scoring.score_component(a_type, code, reading.value)
+            # A reader that scored itself (exciting current's two-limit table)
+            # wins; everything else is one value banded against its range table.
+            score = reading.score if reading.score is not None else \
+                scoring.score_component(a_type, code, reading.value)
             entry.update(value=reading.value, score=score, date=reading.date,
                          source=reading.source, detail=reading.detail,
                          candidates=_candidates(reading), rule=reading.rule,
@@ -278,6 +432,14 @@ def compute(asset_number: str, date_from: str = OPEN_FROM, date_to: str = OPEN_T
             total += w * c["score"]
 
     hi = round(total, 2) if available else None
+    uncorrected = hi
+    correction = None
+    if dga_correction is not None:
+        if a_type == "TR" and dga_window is None and "DGAL" in manual and "DGAT" in manual:
+            dga_window = _dga_window(asset_number)
+        correction = _dga_correction(asset_number, a_type, hi, date_from, date_to,
+                                     dga_correction, dga_window)
+        hi = correction["hiAfter"]
     band = scoring.hi_band(hi)
     missing = [c["code"] for c in components if not c["available"]]
     deselected = [c["code"] for c in components
@@ -305,6 +467,8 @@ def compute(asset_number: str, date_from: str = OPEN_FROM, date_to: str = OPEN_T
         "missingComponents": missing,
         "deselectedComponents": deselected,
         "manualAge": manual_age,
+        "healthIndexUncorrected": uncorrected,
+        "dgaCorrection": correction,
         "coverage": round(len(available) / len(order) * 100, 1) if order else 0.0,
         "dateFrom": date_from,
         "dateTo": date_to,

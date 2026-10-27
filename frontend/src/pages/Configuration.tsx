@@ -50,7 +50,7 @@ const FLAG_NOTES: Record<string, { title: string; detail: string }> = {
   dgaPerGasOwnField: {
     title: 'DGA scores each gas against its own field',
     detail:
-      'The legacy logic compared every gas against H2ppm. Enabled means each gas is banded against its own column.',
+      'Enabled (default): each gas is banded on its own ppm value against its own table. A blank gas scores 0 with its weight still counted, and per-gas bands exclude both ends. Disabled bands every gas on H2ppm, as the source text was written.',
   },
   diranaScoreOwnValue: {
     title: 'DIRANA bands its own value',
@@ -71,11 +71,6 @@ const FLAG_NOTES: Record<string, { title: string; detail: string }> = {
     title: 'OLTC reads CEB_OLTC',
     detail:
       'The table mapping pointed PRM010 at CEB_OUT_CT, the CT table. Enabled means OLTC oil tests read the real CEB_OLTC table.',
-  },
-  ecBandAscending: {
-    title: 'Exciting current uses deterministic banding',
-    detail:
-      'The legacy condition mixed two deviations across both range bounds with an OR, which cannot select a band deterministically. Enabled means the larger deviation is banded normally.',
   },
 }
 

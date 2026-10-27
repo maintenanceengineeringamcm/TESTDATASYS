@@ -146,6 +146,32 @@ def _normalise(range_from: float, range_to: float) -> tuple[float, float, bool]:
     return range_to, range_from, True
 
 
+# Band tables whose two columns are not a From-To range but two independent
+# limits. EXCU (exciting current) stores the Diff1 limit in RangeFrom and the
+# Diff2 limit in RangeTo, and a row applies when *either* deviation reaches its
+# limit (spec section 3, GetEXCUScore). For these, Band.low holds the Diff1
+# limit and Band.high the Diff2 limit, and rows keep their stored order.
+TWO_LIMIT_BANDS = {"EXCU"}
+
+
+def _build_bands(band_name: str, rows: list[tuple[float, float, float, int]]) -> list[Band]:
+    """(rangeFrom, rangeTo, score, sequence) rows -> the table's Band list."""
+    bands: list[Band] = []
+    if band_name in TWO_LIMIT_BANDS:
+        # (0, 0) is meaningful here - the "always reached" baseline row.
+        for rf, rt, score, seq in rows:
+            bands.append(Band(low=rf, high=rt, score=score, sequence=seq, descending=False))
+        bands.sort(key=lambda b: b.sequence)
+        return bands
+    for rf, rt, score, seq in rows:
+        if rf == rt:
+            continue                     # an unconfigured slot; carries no information
+        low, high, desc = _normalise(rf, rt)
+        bands.append(Band(low=low, high=high, score=score, sequence=seq, descending=desc))
+    bands.sort(key=lambda b: b.low)
+    return bands
+
+
 def _load_score_sets() -> dict[str, dict[str, list[Band]]]:
     """Newest score set per asset type -> {bandName: [Band, ...]}."""
     latest = db.query(
@@ -160,21 +186,13 @@ def _load_score_sets() -> dict[str, dict[str, list[Band]]]:
             "WHERE Parent = ? ORDER BY Type, Sequence",
             (pid,),
         )
-        bands: dict[str, list[Band]] = {}
+        raw: dict[str, list[tuple[float, float, float, int]]] = {}
         for r in rows:
-            rf = float(r["RangeFrom"] or 0.0)
-            rt = float(r["RangeTo"] or 0.0)
-            if rf == rt:
-                # An unconfigured slot; carries no information.
-                continue
-            low, high, desc = _normalise(rf, rt)
-            bands.setdefault(r["Type"], []).append(
-                Band(low=low, high=high, score=float(r["Value"] or 0.0),
-                     sequence=int(r["Sequence"] or 0), descending=desc)
-            )
-        for name in bands:
-            bands[name].sort(key=lambda b: b.low)
-        out[asset_type] = bands
+            raw.setdefault(r["Type"], []).append(
+                (float(r["RangeFrom"] or 0.0), float(r["RangeTo"] or 0.0),
+                 float(r["Value"] or 0.0), int(r["Sequence"] or 0)))
+        bands = {name: _build_bands(name, rs) for name, rs in raw.items()}
+        out[asset_type] = {name: b for name, b in bands.items() if b}
     return out
 
 
@@ -193,19 +211,12 @@ def _load_weight_sets() -> dict[str, dict[str, float]]:
     return out
 
 
-def _bands_from_rows(rows: list[dict[str, Any]]) -> list[Band]:
+def _bands_from_rows(band_name: str, rows: list[dict[str, Any]]) -> list[Band]:
     """Build a band list from override rows (rangeFrom/rangeTo/score/sequence)."""
-    bands: list[Band] = []
-    for i, r in enumerate(rows, start=1):
-        rf = float(r.get("rangeFrom") or 0.0)
-        rt = float(r.get("rangeTo") or 0.0)
-        if rf == rt:
-            continue
-        low, high, desc = _normalise(rf, rt)
-        bands.append(Band(low=low, high=high, score=float(r.get("score") or 0.0),
-                          sequence=int(r.get("sequence") or i), descending=desc))
-    bands.sort(key=lambda b: b.low)
-    return bands
+    return _build_bands(band_name, [
+        (float(r.get("rangeFrom") or 0.0), float(r.get("rangeTo") or 0.0),
+         float(r.get("score") or 0.0), int(r.get("sequence") or i))
+        for i, r in enumerate(rows, start=1)])
 
 
 def score_sets() -> dict[str, dict[str, list[Band]]]:
@@ -225,7 +236,7 @@ def score_sets() -> dict[str, dict[str, list[Band]]]:
         asset_type, _, band_name = key.partition("/")
         if not asset_type or not band_name:
             continue
-        bands = _bands_from_rows(entry.get("bands") or [])
+        bands = _bands_from_rows(band_name, entry.get("bands") or [])
         if bands:
             merged.setdefault(asset_type, {})[band_name] = bands
     return merged
@@ -272,6 +283,77 @@ def score_component(asset_type: str, component: str, value: float | None) -> flo
     if not band_name:
         return None
     return lookup(value, bands_for(asset_type, band_name))
+
+
+def lookup_two_limit(diff1: float, diff2: float, bands: list[Band]) -> tuple[float, Band] | None:
+    """Score a two-limit table such as EXCU.
+
+    A row is *reached* when Diff1 >= its Diff1 limit or Diff2 >= its Diff2
+    limit. Rows run from healthy to worst, so the last row reached decides the
+    score. Below every limit is the healthiest score in the table. Returns
+    (score, deciding band), or None when there is no table.
+    """
+    if not bands:
+        return None
+    reached = [b for b in bands if diff1 >= b.low or diff2 >= b.high]
+    if reached:
+        return reached[-1].score, reached[-1]
+    best = max(bands, key=lambda b: b.score)
+    return best.score, best
+
+
+def score_exciting_current(asset_type: str, diff1: float, diff2: float) -> tuple[float, Band] | None:
+    band_name = BAND_FOR_COMPONENT.get(asset_type, {}).get("EC")
+    return lookup_two_limit(diff1, diff2, bands_for(asset_type, band_name)) if band_name else None
+
+
+# What each band table measures, for the Configuration screen. Two-limit tables
+# carry their own column names; the rest are From-To ranges in `unit`.
+BAND_INFO: dict[str, dict[str, Any]] = {
+    "AGE": {"title": "Age", "unit": "years"},
+    "FURAN": {"title": "Furanic compounds (paper ageing)", "unit": "ppb"},
+    "DGA": {"title": "DGA gas-level index", "unit": "weighted gas score",
+            "note": "Banded on the weighted combination of the per-gas scores below."},
+    "DF": {"title": "Winding tan δ (dissipation factor)", "unit": "%"},
+    "DIRANA": {"title": "Moisture in paper (DIRANA dielectric response)", "unit": "% moisture"},
+    "TTR": {"title": "Turns ratio deviation", "unit": "%"},
+    "LEAK": {"title": "Leakage reactance (short-circuit impedance) deviation", "unit": "%"},
+    "DCW": {"title": "DC winding resistance - worst phase-to-phase deviation", "unit": "%"},
+    "EXCU": {
+        "title": "Exciting current - phase deviations",
+        "unit": "%",
+        "kind": "two-limit",
+        "columns": ["Diff1 ≥", "Diff2 ≥"],
+        "note": ("Diff1: outer phases against the middle phase (|A−B|/A, |B−C|/C). "
+                 "Diff2: the two outer phases against each other (|C−A|). A row applies "
+                 "when Diff1 or Diff2 reaches its limit; the worst row reached sets the "
+                 "score. The first row (0, 0) is the healthy baseline."),
+    },
+    "IR": {"title": "Insulation resistance", "unit": "GΩ"},
+    "BDV": {"title": "Oil breakdown voltage", "unit": "kV"},
+    "MOIST": {"title": "Moisture in oil", "unit": "ppm"},
+    "ACID": {"title": "Acidity of oil", "unit": "mg KOH/g"},
+    "IFT": {"title": "Interfacial tension", "unit": "mN/m"},
+    "PD": {"title": "Partial discharge", "unit": "pC"},
+    **{g: {"title": f"{g} dissolved gas", "unit": "ppm"}
+       for g in ("H2", "CH4", "CO", "CO2", "C2H4", "C2H6", "C2H2")},
+}
+
+
+def band_info(band_name: str) -> dict[str, Any]:
+    """Description for any band table; falls back to its component's label."""
+    info = dict(BAND_INFO.get(band_name.split("#")[0], {}))
+    if not info:
+        for comps in BAND_FOR_COMPONENT.values():
+            for code, name in comps.items():
+                if name == band_name:
+                    info = {"title": COMPONENT_LABEL.get(code, code),
+                            "unit": COMPONENT_UNIT.get(code, "")}
+    info.setdefault("title", band_name)
+    info.setdefault("unit", "")
+    info.setdefault("kind", "range")
+    info.setdefault("columns", ["From", "To"])
+    return info
 
 
 def weights_for(asset_type: str) -> dict[str, float]:
@@ -418,6 +500,7 @@ def config_snapshot() -> dict[str, Any]:
                     "updatedAt": meta["bands"].get(f"{t}/{name}", {}).get("updatedAt"),
                     "updatedBy": meta["bands"].get(f"{t}/{name}", {}).get("updatedBy"),
                     "note": meta["bands"].get(f"{t}/{name}", {}).get("note", ""),
+                    "info": band_info(name),
                     "bands": [
                         {
                             "sequence": b.sequence,

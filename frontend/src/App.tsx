@@ -10,6 +10,7 @@ import DgaStatus from './pages/DgaStatus'
 import DgaStatusEntry from './pages/DgaStatusEntry'
 import DuvalDiagnosis from './pages/DuvalDiagnosis'
 import HealthIndex from './pages/HealthIndex'
+import HiExport from './pages/HiExport'
 import HistoryView from './pages/HistoryView'
 import ManualCalculation from './pages/ManualCalculation'
 import TrendAnalysis from './pages/TrendAnalysis'
@@ -20,6 +21,7 @@ export default function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="health-index" element={<HealthIndex />} />
+        <Route path="hi-export" element={<HiExport />} />
         {/* Asset numbers contain slashes, so these routes take a wildcard. The
             manual route is declared first so it is not swallowed by the detail one. */}
         <Route path="manual-calculation/*" element={<ManualCalculation />} />

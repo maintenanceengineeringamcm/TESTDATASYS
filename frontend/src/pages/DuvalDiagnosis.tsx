@@ -86,7 +86,7 @@ export default function DuvalDiagnosis() {
       <SectionHeader
         accent="#4A3AA7"
         icon={PentagonIcon}
-        title="Duval Diagnosis"
+        title="Fault Diagnosis"
         subtitle="Multi-method fault diagnosis — pentagons, triangles, IEEE limits, Rogers ratios and key gas"
       />
 

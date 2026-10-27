@@ -61,6 +61,9 @@ class Reading:
     # chosen one is highlighted; 'blend' - all of them combine into the value,
     # so highlighting any single one would be misleading.
     mode: str = "single"
+    # Set only by readers whose score cannot come from banding one value (the
+    # exciting current's two-limit table); the engine then uses it as is.
+    score: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {"value": self.value, "date": self.date, "source": self.source,
@@ -360,6 +363,42 @@ def read_dga_sample(asset: str, date_from: str = OPEN_FROM,
     return {"gases": gases, "date": row["_d"], "source": "CEB_DGA_DATA"}
 
 
+def read_dga_level_sample(asset: str, date_from: str = OPEN_FROM,
+                          date_to: str = OPEN_TO, sampled_from: str | None = None,
+                          sampled_before: str | None = None) -> dict[str, Any] | None:
+    """The record GetDGALevScore uses: the newest CEB_DGA_DATA row in range.
+
+    Selected on DateTested, the spec's "newest record" column, and taken as
+    it is - a row with blank gases is not skipped, because the source logic
+    scores a blank gas 0 rather than looking further back. (read_dga_sample,
+    which the diagnosis screens use, does skip rows without gas values.)
+
+    `sampled_from` (inclusive) / `sampled_before` (exclusive) restrict the row to
+    a DateSampled window - the side of an oil filtration being scored.
+    """
+    cols = list(DGA_GAS_FIELDS.values())
+    if sampled_from or sampled_before:
+        sql = (f"SELECT TOP 1 {', '.join(cols)}, DateTested AS _d FROM CEB_DGA_DATA "
+               "WHERE LTRIM(RTRIM(AssetNumber)) = ? AND DateTested IS NOT NULL "
+               "  AND DateTested >= ? AND DateTested <= ? "
+               "  AND DateSampled >= ? AND DateSampled < ? "
+               "ORDER BY DateTested DESC")
+        try:
+            row = db.query_one(sql, (asset.strip(), date_from, date_to,
+                                     sampled_from or OPEN_FROM, sampled_before or OPEN_TO))
+        except db.DatabaseError as exc:
+            log.warning("DGA level read failed for %s: %s", asset, exc)
+            row = None
+    else:
+        # require=DateTested: every row in the window qualifies, filled or not.
+        row = newest_row("CEB_DGA_DATA", asset, cols, "DateTested", date_from, date_to,
+                         require=["DateTested"])
+    if not row:
+        return None
+    return {"gases": {g: _f(row, col) for g, col in DGA_GAS_FIELDS.items()},
+            "date": row["_d"], "source": "CEB_DGA_DATA"}
+
+
 def read_tand(asset: str, date_from: str = OPEN_FROM, date_to: str = OPEN_TO) -> Reading | None:
     """Winding dissipation factor: worst corrected tan-delta across the test."""
     job = newest_job_test(asset, "Winding DF & CAP", date_from, date_to)
@@ -477,32 +516,52 @@ def read_winding_resistance(asset: str, date_from: str = OPEN_FROM,
 
 def read_exciting_current(asset: str, date_from: str = OPEN_FROM,
                           date_to: str = OPEN_TO) -> Reading | None:
-    """Worst phase-to-phase exciting-current deviation, as a percentage.
+    """Exciting-current deviations, scored on the EXCU two-limit table.
 
-    The legacy banding condition mixed two separately computed deviations across
-    the two range bounds with an OR, which cannot select a band deterministically
-    (spec section 9 item 6). With `EC_BAND_ASCENDING` set - the default - the
-    governing value is the larger of the two deviations and it is banded
-    normally.
+    Per tap (spec section 3, GetEXCUScore), in percent:
+
+        Diff1 = max(|A-B|/A, |B-C|/C)   outer phases against the middle phase
+        Diff2 = max(|C-A|/C, |C-A|/A)   the two outer phases against each other
+
+    EXCU holds a Diff1 limit and a Diff2 limit per row, and a row applies when
+    either deviation reaches its limit (see scoring.lookup_two_limit). The tap
+    with the worst score decides. `value` is that tap's Diff1, the figure the
+    Diff1 limits (30-50 %) are written in; Diff2 travels in `detail`.
     """
+    from core import scoring           # local: scoring must not import readers
+
     job = newest_job_test(asset, "Exciting Current", date_from, date_to)
     if not job:
         return None
     rows = _job_rows("EXCITING_CURRENT", job["JobId"], "", "EXCITING_CURRENT_DATA",
                      "d.Tap AS tap, d.PhaAIOutA AS a, d.PhaBIOutA AS b, d.PhaCIOutA AS c")
-    pairs: list[tuple[str, float | None]] = []
+    taps: list[tuple[str, float, float, float | None]] = []   # label, diff1, diff2, score
     for i, r in enumerate(rows, start=1):
         a, b, c = _f(r, "a"), _f(r, "b"), _f(r, "c")
         if None in (a, b, c) or 0 in (a, b, c):
             continue
-        diff1 = max(abs(a - b) / a, abs(b - c) / c)
-        diff2 = max(abs(c - a) / c, abs(c - a) / a)
-        chosen = max(diff1, diff2) if Config.EC_BAND_ASCENDING else diff1
-        pairs.append((f"tap {r.get('tap') or i}", chosen * 100.0))
-    reading = _spread(pairs, "max", job["_d"], "EXCITING_CURRENT")
-    if reading:
-        reading.detail = {"taps": len(rows)}
-    return reading
+        diff1 = max(abs(a - b) / a, abs(b - c) / c) * 100.0
+        diff2 = max(abs(c - a) / c, abs(c - a) / a) * 100.0
+        scored = scoring.score_exciting_current("TR", diff1, diff2)
+        taps.append((f"tap {r.get('tap') or i}", diff1, diff2, scored[0] if scored else None))
+    if not taps:
+        return None
+
+    # Worst tap: lowest score, then the larger deviations.
+    worst = min(taps, key=lambda t: (t[3] if t[3] is not None else 2.0, -t[1], -t[2]))
+    label, diff1, diff2, score = worst
+    candidates = [Candidate(label=f"{lab}: Diff1 {d1:.2f} %, Diff2 {d2:.2f} %", value=round(d1, 4),
+                            date=job["_d"], source="EXCITING_CURRENT", used=(lab == label),
+                            reason="" if lab == label else f"scores {s:g}" if s is not None else "")
+                  for lab, d1, d2, s in taps]
+    return Reading(
+        value=round(diff1, 4), date=job["_d"], source="EXCITING_CURRENT",
+        candidates=candidates, mode="pick" if len(taps) > 1 else "single",
+        score=score,
+        rule=(f"worst of {len(taps)} tap(s): Diff1 {diff1:.2f} %, Diff2 {diff2:.2f} % "
+              f"against the EXCU Diff1/Diff2 limits"),
+        detail={"taps": len(rows), "diff1Pct": round(diff1, 4), "diff2Pct": round(diff2, 4),
+                "tap": label})
 
 
 _IR_POL_FIELDS = ["IRHVE1", "IRHVE10", "IRHVLV1", "IRHVLV10", "IRLVE1", "IRLVE10"]

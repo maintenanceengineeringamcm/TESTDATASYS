@@ -24,3 +24,4 @@ ml_models/*.json
 __pycache__/
 *.py[cod]
 .pytest_cache/
+snapshots/exports/

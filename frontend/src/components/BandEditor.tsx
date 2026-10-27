@@ -10,11 +10,22 @@ export interface EditableBand {
   descending?: boolean
 }
 
+/** What a band table measures, and how its two columns are read. */
+export interface BandInfo {
+  title: string
+  unit: string
+  /** 'range': From-To bands. 'two-limit': two independent limits (EXCU). */
+  kind: 'range' | 'two-limit'
+  columns: [string, string]
+  note?: string
+}
+
 export interface BandTable {
   overridden: boolean
   updatedAt: string | null
   updatedBy: string | null
   note: string
+  info?: BandInfo
   bands: EditableBand[]
 }
 
@@ -74,6 +85,10 @@ export default function BandEditor({
   }
 
   const path = `/config/bands/${assetType}/${encodeURIComponent(bandName)}`
+  const info = table.info
+  const twoLimit = info?.kind === 'two-limit'
+  const [colA, colB] = info?.columns ?? ['From', 'To']
+  const unit = info?.unit ? ` (${info.unit})` : ''
 
   async function save() {
     setBusy(true)
@@ -111,6 +126,17 @@ export default function BandEditor({
     <div className="rounded-lg border border-line">
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-brand-50/60 px-3 py-2">
         <span className="font-mono text-[11px] font-bold text-ink">{bandName}</span>
+        {info?.title && info.title !== bandName && (
+          <span className="text-[11px] text-ink-soft">{info.title}</span>
+        )}
+        {twoLimit && (
+          <span
+            className="chip bg-white text-[10px] text-ink-muted"
+            title="The two columns are separate limits, not a From-To range."
+          >
+            two limits
+          </span>
+        )}
         {table.bands.some((b) => b.descending) && (
           <span
             className="chip bg-white text-[10px] text-ink-muted"
@@ -174,6 +200,12 @@ export default function BandEditor({
         </div>
       </div>
 
+      {twoLimit && info?.note && (
+        <p className="border-b border-line bg-white px-3 py-2 text-[10px] leading-relaxed text-ink-muted">
+          {info.note}
+        </p>
+      )}
+
       {error && (
         <p className="border-b border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-800">
           {error}
@@ -184,10 +216,12 @@ export default function BandEditor({
         <thead>
           <tr>
             <th className="px-3 py-1 text-left text-[10px] font-semibold uppercase text-ink-faint">
-              From
+              {colA}
+              <span className="normal-case">{unit}</span>
             </th>
             <th className="px-3 py-1 text-left text-[10px] font-semibold uppercase text-ink-faint">
-              To
+              {colB}
+              <span className="normal-case">{unit}</span>
             </th>
             <th className="px-3 py-1 text-right text-[10px] font-semibold uppercase text-ink-faint">
               Score

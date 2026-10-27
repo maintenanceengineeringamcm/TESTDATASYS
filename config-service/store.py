@@ -85,7 +85,13 @@ def _now() -> str:
 # --------------------------------------------------------------------------
 # Bands
 # --------------------------------------------------------------------------
-def _clean_bands(bands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+# Tables whose two columns are independent limits rather than a From-To range
+# (EXCU: Diff1 limit, Diff2 limit). Equal values - the (0, 0) baseline row -
+# are valid there. Mirrors TWO_LIMIT_BANDS in the API's core/scoring.py.
+TWO_LIMIT_BANDS = {"EXCU"}
+
+
+def _clean_bands(bands: list[dict[str, Any]], band_name: str = "") -> list[dict[str, Any]]:
     """Validate and normalise a band list before it is stored."""
     out = []
     for i, b in enumerate(bands, start=1):
@@ -95,7 +101,7 @@ def _clean_bands(bands: list[dict[str, Any]]) -> list[dict[str, Any]]:
             score = float(b["score"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Band {i} is missing a numeric rangeFrom/rangeTo/score.") from exc
-        if lo == hi:
+        if lo == hi and band_name not in TWO_LIMIT_BANDS:
             raise ValueError(f"Band {i} has an empty range ({lo} to {hi}).")
         out.append({
             "sequence": int(b.get("sequence") or i),
@@ -144,7 +150,7 @@ def all_bands() -> dict[str, dict[str, Any]]:
 
 def save_band(asset_type: str, band_name: str, bands: list[dict[str, Any]],
               user: str = "unknown", note: str = "") -> dict[str, Any]:
-    cleaned = _clean_bands(bands)
+    cleaned = _clean_bands(bands, band_name)
     before = get_band(asset_type, band_name)
     with _lock:
         conn = _conn()

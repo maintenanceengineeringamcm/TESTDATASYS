@@ -4,6 +4,7 @@ import {
   CheckSquare,
   Info,
   RotateCcw,
+  ShieldAlert,
   Square,
   Sigma,
 } from 'lucide-react'
@@ -12,6 +13,16 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { ConfigWarning, ErrorNote, HIBadge, Loader, SectionHeader } from '../components/ui'
 import type { HIComponent, HIDetail } from '../types'
+
+/** Share of the final index removed per IEEE C57.104 DGA status (0.7 = -70%). */
+const DGA_FACTOR_DEFAULTS: Record<string, string> = { '1': '0', '2': '0.3', '3': '0.7' }
+
+interface Correction {
+  on: boolean
+  factors: Record<string, string>
+}
+
+const NO_CORRECTION: Correction = { on: false, factors: DGA_FACTOR_DEFAULTS }
 
 /** The DB values behind one criterion, with the considered one highlighted. */
 function CandidateCells({ component }: { component: HIComponent }) {
@@ -85,12 +96,13 @@ export default function ManualCalculation() {
   const [selected, setSelected] = useState<Set<string> | null>(null)
   const [manual, setManual] = useState<Record<string, string>>({})
   const [age, setAge] = useState('')
+  const [correction, setCorrection] = useState<Correction>(NO_CORRECTION)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const run = useCallback(
     async (sel: Set<string> | null, man: Record<string, string>, ageValue: string,
-           asBaseline = false) => {
+           corr: Correction, asBaseline = false) => {
       setBusy(true)
       setError(null)
       try {
@@ -102,6 +114,14 @@ export default function ManualCalculation() {
         const body: Record<string, unknown> = { manual: manualScores }
         if (sel) body.selected = [...sel]
         if (ageValue !== '') body.age = Number(ageValue)
+        if (corr.on) {
+          const factors: Record<string, number> = {}
+          for (const [k, v] of Object.entries(corr.factors)) {
+            const n = Number(v)
+            if (v !== '' && !Number.isNaN(n)) factors[k] = Math.max(0, Math.min(1, n))
+          }
+          body.dgaCorrection = { enabled: true, factors }
+        }
 
         const res = await api.post<HIDetail>(
           `/health-index/${encodeURIComponent(asset)}`,
@@ -120,7 +140,7 @@ export default function ManualCalculation() {
 
   // First load scores everything, which also tells us which criteria exist.
   useEffect(() => {
-    if (asset) run(null, {}, '', true)
+    if (asset) run(null, {}, '', NO_CORRECTION, true)
   }, [asset, run])
 
   const components = result?.components ?? []
@@ -157,8 +177,12 @@ export default function ManualCalculation() {
     setSelected(null)
     setManual({})
     setAge('')
-    run(null, {}, '', true)
+    setCorrection(NO_CORRECTION)
+    run(null, {}, '', NO_CORRECTION, true)
   }
+
+  const dga = result?.dgaCorrection ?? null
+  const isTransformer = result?.assetType === 'TR'
 
   const chosenCount = selected
     ? selected.size
@@ -186,7 +210,7 @@ export default function ManualCalculation() {
               Reset
             </button>
             <button
-              onClick={() => run(selected, manual, age)}
+              onClick={() => run(selected, manual, age, correction)}
               className="btn-primary"
               disabled={busy}
             >
@@ -230,6 +254,13 @@ export default function ManualCalculation() {
                     size="lg"
                   />
                 </div>
+              )}
+              {dga?.applied && dga.factor > 0 && (
+                <p className="mt-2 text-[11px] text-ink-muted">
+                  Before DGA correction:{' '}
+                  <span className="num font-semibold">{dga.hiBefore?.toFixed(2) ?? '—'}</span>{' '}
+                  (×{(1 - dga.factor).toFixed(2)})
+                </p>
               )}
               {baseline && baseline.healthIndex !== result.healthIndex && (
                 <p className="mt-2 text-[11px] text-ink-muted">
@@ -323,6 +354,88 @@ export default function ManualCalculation() {
               </p>
             </div>
           </div>
+
+          {isTransformer && (
+            <div className="card card-pad mb-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <ShieldAlert className="h-4 w-4 text-brand-600" />
+                <h2 className="text-sm font-bold text-ink">DGA correction factor</h2>
+                <label className="ml-2 inline-flex cursor-pointer items-center gap-1.5 text-xs font-semibold text-ink-soft">
+                  <input
+                    type="checkbox"
+                    checked={correction.on}
+                    onChange={(e) => setCorrection((c) => ({ ...c, on: e.target.checked }))}
+                  />
+                  Apply to the final health index
+                </label>
+                {dga && (
+                  <span
+                    className="chip ml-auto text-[11px]"
+                    style={{ background: dga.bg ?? '#F1F5F9', color: dga.color ?? '#64748B' }}
+                    title={
+                      dga.latestSample
+                        ? `Latest sample ${String(dga.latestSample).slice(0, 10)}`
+                        : ''
+                    }
+                  >
+                    {dga.status ? `${dga.statusLabel} · ${dga.verdict}` : 'DGA not classified'}
+                  </span>
+                )}
+              </div>
+
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {(['1', '2', '3'] as const).map((st) => {
+                  const raw = correction.factors[st] ?? ''
+                  const pct = raw === '' || Number.isNaN(Number(raw))
+                    ? ''
+                    : `−${Math.round(Number(raw) * 100)}%`
+                  return (
+                    <div key={st}>
+                      <label className="label">
+                        Status {st} factor
+                        {dga?.applied && dga.status === Number(st) && (
+                          <span className="ml-1 font-bold text-brand-700">(this asset)</span>
+                        )}
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          className="input num"
+                          type="number"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          placeholder={DGA_FACTOR_DEFAULTS[st]}
+                          disabled={!correction.on}
+                          value={raw}
+                          onChange={(e) =>
+                            setCorrection((c) => ({
+                              ...c,
+                              factors: { ...c.factors, [st]: e.target.value },
+                            }))
+                          }
+                        />
+                        <span className="num w-12 text-xs text-ink-muted">{pct}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <p className="mt-3 text-[11px] leading-relaxed text-ink-muted">
+                Final HI = calculated HI × (1 − factor), using the transformer&apos;s IEEE
+                C57.104-2019 DGA status. Defaults: Status 1 no correction, Status 2 0.3,
+                Status 3 0.7 (index reduced by 70%). A transformer with no classifiable
+                DGA keeps its index. Press Calculate to apply.
+                {dga && (
+                  <span className="mt-1 block font-semibold text-ink-soft">
+                    {dga.applied
+                      ? `${dga.message} — ${dga.hiBefore?.toFixed(2)} → ${dga.hiAfter?.toFixed(2)}`
+                      : dga.message}
+                  </span>
+                )}
+              </p>
+            </div>
+          )}
 
           {/* Criteria table */}
           <div className="card">
@@ -478,6 +591,18 @@ export default function ManualCalculation() {
                   })}
                 </tbody>
                 <tfoot>
+                  {dga?.applied && dga.factor > 0 && (
+                    <tr className="bg-brand-50/40">
+                      <td className="td"></td>
+                      <td className="td text-xs font-semibold text-ink-soft" colSpan={5}>
+                        DGA correction — {dga.statusLabel}, × (1 − {dga.factor})
+                      </td>
+                      <td className="td num text-xs text-ink-soft">
+                        {dga.hiBefore?.toFixed(2)} → {dga.hiAfter?.toFixed(2)}
+                      </td>
+                      <td className="td"></td>
+                    </tr>
+                  )}
                   <tr className="bg-brand-50/70">
                     <td className="td"></td>
                     <td className="td text-xs font-bold text-ink">Health Index</td>

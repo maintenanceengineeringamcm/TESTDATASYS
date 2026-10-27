@@ -852,7 +852,7 @@ export default function DgaStatus() {
                 would change which samples form the rate group, so it is deliberately not offered
                 here. To classify figures that are not on record yet, use{' '}
                 <Link className="link" to="/dga-entry">
-                  DGA Status Entry
+                  Check Typed-in Results
                 </Link>
                 .
               </p>

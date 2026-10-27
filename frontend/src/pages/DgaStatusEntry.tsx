@@ -24,7 +24,7 @@ export default function DgaStatusEntry() {
         <SectionHeader
           accent="#195B96"
           icon={Keyboard}
-          title="DGA Status Entry"
+          title="Check Typed-in Results"
           subtitle="Classify dissolved-gas results you type in — IEEE C57.104-2019,
                     with the same evidence table and report as a stored asset"
         />

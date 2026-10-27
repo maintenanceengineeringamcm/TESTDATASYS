@@ -43,13 +43,28 @@ WHERE m.site_cd = ?
   AND LTRIM(RTRIM(m.ast_mst_asset_no)) <> ''
 """
 
-# The staging table as shipped has no status column. Adding one is what makes
-# the ISF filter live; without it every asset reads as unknown status.
-ADD_STATUS_COLUMN = """
+# The staging table as shipped does not fit what the CMMS actually holds, so
+# the schema is brought into line before every load. All three statements are
+# idempotent, and none touches a row's contents:
+#
+# 1. No status column at all. Adding one is what makes the ISF filter live;
+#    without it every asset reads as unknown status.
+# 2. `tomms_asset_no` is varchar(25), but `ast_mst_asset_no` is varchar(30) and
+#    648 live asset numbers are longer than 25 - they raised
+#    "String data, right truncation: length 54 buffer 50" (pyodbc counts the
+#    wide-char buffer in bytes: 50 bytes = 25 characters).
+# 3. `asset_desc` is NOT NULL, but one CMMS row has no short description.
+#    Widening the column is not enough; the load writes '' for those.
+ENSURE_SCHEMA = """
 IF NOT EXISTS (SELECT 1 FROM sys.columns
                WHERE object_id = OBJECT_ID('dbo.Tomms_CEBT')
                  AND name = 'ast_mst_asset_status')
     ALTER TABLE dbo.Tomms_CEBT ADD ast_mst_asset_status varchar(6) NULL;
+
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID('dbo.Tomms_CEBT')
+             AND name = 'tomms_asset_no' AND max_length < 30)
+    ALTER TABLE dbo.Tomms_CEBT ALTER COLUMN tomms_asset_no varchar(30) NULL;
 """
 
 
@@ -90,16 +105,21 @@ def load(rows: list[tuple]) -> int:
     with _connect(connection_string()) as cx:
         cx.autocommit = False
         cur = cx.cursor()
-        cur.execute(ADD_STATUS_COLUMN)
+        cur.execute(ENSURE_SCHEMA)
         # Full replace, per doc 13 - a delta cannot see deletes, and a row that
         # vanished upstream would linger here forever.
         cur.execute("DELETE FROM dbo.Tomms_CEBT")
         cur.fast_executemany = True
+        # `tomms_id` is NOT NULL with no identity and no default, so the load
+        # has to number the rows itself; `asset_desc` is NOT NULL, so an asset
+        # the CMMS never named is stored with an empty description rather than
+        # failing the whole batch.
         cur.executemany(
             "INSERT INTO dbo.Tomms_CEBT "
-            "(tomms_asset_no, asset_desc, ast_mst_asset_status, mst_RowID) "
-            "VALUES (?, ?, ?, ?)",
-            rows,
+            "(tomms_id, tomms_asset_no, asset_desc, ast_mst_asset_status, mst_RowID) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(i, asset_no, desc or "", status, row_id)
+             for i, (asset_no, desc, status, row_id) in enumerate(rows, start=1)],
         )
         cx.commit()
     return len(rows)

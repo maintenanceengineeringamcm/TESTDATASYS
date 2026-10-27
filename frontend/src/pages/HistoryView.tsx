@@ -187,7 +187,7 @@ export default function HistoryView() {
       <SectionHeader
         accent="#41708C"
         icon={History}
-        title="History View"
+        title="Test History"
         subtitle="Every stored record of a single test for a single asset, newest first"
       />
 

@@ -6,6 +6,7 @@ import {
   Legend,
   Line,
   LineChart,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -37,15 +38,29 @@ function TooltipBox({ active, payload, label, unit = '' }: any) {
   )
 }
 
+/** A vertical event marker on a date chart, e.g. an oil filtration point. */
+export interface ChartMarker {
+  key: string
+  date: string        // YYYY-MM-DD; snapped to the first sample on or after it
+  label: string
+  color: string
+  dashed?: boolean
+}
+
 /** Gas concentration vs sampling date. */
 export function GasTrendChart({
   points,
   gases,
   height = 320,
+  markers = [],
+  shadeBefore,
 }: {
   points: Record<string, any>[]
   gases: string[]
   height?: number
+  markers?: ChartMarker[]
+  /** Grey out the samples before this date (they are shown but not analysed). */
+  shadeBefore?: string
 }) {
   if (!points.length) {
     return (
@@ -54,9 +69,14 @@ export function GasTrendChart({
       </div>
     )
   }
+  // The x axis is categorical (one tick per sample), so a marker has to sit on a
+  // sample date: use the first sample on or after the marked day.
+  const snap = (date: string) => points.find((p) => p.date >= date)?.date as string | undefined
+  const before = shadeBefore ? points.filter((p) => p.date < shadeBefore) : []
+  const shadeEnd = before.length ? (before[before.length - 1].date as string) : undefined
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <LineChart data={points} margin={{ top: 8, right: 16, bottom: 8, left: 4 }}>
+      <LineChart data={points} margin={{ top: 22, right: 16, bottom: 8, left: 4 }}>
         <CartesianGrid stroke="#E3F0FC" vertical={false} />
         <XAxis dataKey="date" tick={axisStyle} tickLine={false} axisLine={{ stroke: '#DCE7F3' }}
                angle={-30} textAnchor="end" height={54} />
@@ -65,6 +85,18 @@ export function GasTrendChart({
                         style: { fontSize: 11, fill: '#64748B' } }} />
         <Tooltip content={<TooltipBox unit=" ppm" />} />
         <Legend wrapperStyle={{ fontSize: 12, paddingTop: 4 }} iconType="line" />
+        {shadeEnd && (
+          <ReferenceArea x1={points[0].date} x2={shadeEnd} fill="#94A3B8" fillOpacity={0.12}
+                         ifOverflow="extendDomain" />
+        )}
+        {markers.map((m) => {
+          const x = snap(m.date)
+          return x ? (
+            <ReferenceLine key={m.key} x={x} stroke={m.color} strokeWidth={1.5}
+                           strokeDasharray={m.dashed ? '5 4' : undefined}
+                           label={{ value: m.label, position: 'top', fontSize: 10, fill: m.color }} />
+          ) : null
+        })}
         {gases.map((g) => (
           <Line
             key={g}

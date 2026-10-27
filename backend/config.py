@@ -66,12 +66,20 @@ class Config:
     # HealthIndex_Automation_Spec.md section 9. Defaults implement the
     # "intended" reading; flipping a flag restores the literal legacy
     # behaviour. Every firing is logged (see core/hi_engine.py).
+    # DGA level bands each gas on its own column (confirmed by the user,
+    # 2026-09-22). false restores the source text, which banded every gas on H2ppm.
     DGA_PER_GAS_OWN_FIELD = _bool("HI_DGA_PER_GAS_OWN_FIELD", True)  # item 1
     DIRANA_SCORE_OWN_VALUE = _bool("HI_DIRANA_SCORE_OWN_VALUE", True)  # item 2
     AIO_IFTO_UNCROSSED = _bool("HI_AIO_IFTO_UNCROSSED", True)  # item 3
     SA_IR_USES_IR_FIELD = _bool("HI_SA_IR_USES_IR_FIELD", True)  # item 4
     OLTC_USES_CEB_OLTC = _bool("HI_OLTC_USES_CEB_OLTC", True)  # item 5
-    EC_BAND_ASCENDING = _bool("HI_EC_BAND_ASCENDING", True)  # item 6
+    # Oil filtration resets gas levels. DGA level and DGA trend are scored on the
+    # samples after the last filter point when there are at least this many of
+    # them; otherwise on the data before it (see core/dga_filter.analysis_window).
+    DGA_FILTER_WINDOW = _bool("HI_DGA_FILTER_WINDOW", True)
+    DGA_MIN_SAMPLES_AFTER_FILTER = int(os.getenv("HI_DGA_MIN_SAMPLES_AFTER_FILTER", "3"))
+    # Item 6 (exciting current) is no longer a flag: EXCU is scored on its
+    # Diff1/Diff2 limits as the spec describes - see scoring.lookup_two_limit.
 
     # --- Tomms CMMS (asset hierarchy source) ----------------------------
     # The CMMS database holding `ast_mst`, whose `ast_mst_asset_shortdesc` is

@@ -7,15 +7,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
 import api_v1
 import db
 from config import Config
 from core import assets as assets_mod
-from core import (attributes, dga_status, dga_trend, duval, hi_engine, hierarchy,
-                  history, ml, overrides, pentagon, readers, scoring, snapshots)
+from core import (attributes, dga_filter, dga_status, dga_trend, duval, hi_engine, hi_export,
+                  hierarchy, history, ml, overrides, pentagon, readers, scoring, snapshots)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -391,7 +391,9 @@ def health_index_recompute(number: str):
     """Recompute with an explicit criterion selection and manual inputs.
 
     Body: `{manual: {CODE: score}, selected: [CODE, ...], age: <years>,
-    from, to}`. Omitting `selected` scores every criterion that has data.
+    dgaCorrection: {enabled: bool, factors: {"1": f, "2": f, "3": f}}, from, to}`.
+    Omitting `selected` scores every criterion that has data; omitting
+    `dgaCorrection` (or `enabled: false`) leaves the index uncorrected.
     """
     body = request.get_json(silent=True) or {}
     manual = {k: float(v) for k, v in (body.get("manual") or {}).items()
@@ -409,6 +411,15 @@ def health_index_recompute(number: str):
         return jsonify({"error": "validation",
                         "message": "'age' must be a number of years."}), 400
 
+    correction = body.get("dgaCorrection") or {}
+    factors = None
+    if correction.get("enabled"):
+        try:
+            factors = hi_engine.parse_correction_factors(correction.get("factors"))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": "validation",
+                            "message": f"DGA correction: {exc}."}), 400
+
     result = hi_engine.compute(
         number,
         body.get("from") or OPEN_FROM,
@@ -416,8 +427,61 @@ def health_index_recompute(number: str):
         manual=manual,
         selected=selected,
         manual_age=manual_age,
+        dga_correction=factors,
     )
     return jsonify(result)
+
+
+# --------------------------------------------------------------------------
+# Health-index export - a background job that scores the chosen assets on the
+# chosen criteria and writes an Excel workbook.
+# --------------------------------------------------------------------------
+@app.get("/api/hi-export/options")
+def hi_export_options():
+    return jsonify(hi_export.options())
+
+
+@app.post("/api/hi-export")
+def hi_export_start():
+    """Body: `{category, assets: [..] | null (all in category, within node),
+    criteria: [..] | null (all), dgaCorrection: {enabled, factors}, from, to, node}`."""
+    body = request.get_json(silent=True) or {}
+    category = body.get("category") or ""
+    criteria = body.get("criteria")
+    if criteria is not None and not isinstance(criteria, list):
+        return jsonify({"error": "validation", "message": "'criteria' must be a list."}), 400
+    correction = body.get("dgaCorrection") or {}
+    factors = None
+    try:
+        if correction.get("enabled"):
+            factors = hi_engine.parse_correction_factors(correction.get("factors"))
+        node = (body.get("node") or "").strip().rstrip("/")
+        assets = hi_export.resolve_assets(category, body.get("assets"), node,
+                                          hierarchy.excluded_assets())
+        job = hi_export.start(category, assets, criteria, factors,
+                              body.get("from") or OPEN_FROM, body.get("to") or OPEN_TO,
+                              _editor(), hierarchy.scope_label(node) if node else None)
+    except ValueError as exc:
+        return jsonify({"error": "validation", "message": str(exc)}), 400
+    return jsonify(job), 202
+
+
+@app.get("/api/hi-export/<job_id>")
+def hi_export_status(job_id: str):
+    job = hi_export.status(job_id)
+    if not job:
+        return jsonify({"error": "not_found", "message": "Unknown or expired export."}), 404
+    return jsonify(job)
+
+
+@app.get("/api/hi-export/<job_id>/file")
+def hi_export_file(job_id: str):
+    found = hi_export.workbook_path(job_id)
+    if not found or not found[0].exists():
+        return jsonify({"error": "not_found", "message": "The export is not ready or has expired."}), 404
+    path, name = found
+    return send_file(path, as_attachment=True, download_name=name,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.get("/api/health-index/stored")
@@ -457,6 +521,36 @@ def dga_fleet_trend():
     date_from = body.get("from") or "1900-01-01"
     date_to = body.get("to") or "2999-12-31"
     return jsonify({"rows": dga_trend.fleet_trend(assets, date_from, date_to)})
+
+
+# Oil filtration / degassing points - detected from the gas history, plus marks
+# an engineer adds (or detections they reject). Asset numbers contain slashes,
+# so DELETE takes the asset and the stored id as query parameters.
+@app.get("/api/dga/filter-points/<path:number>")
+def dga_filter_points(number: str):
+    return jsonify(dga_filter.points(number))
+
+
+@app.post("/api/dga/filter-points/<path:number>")
+def dga_filter_point_add(number: str):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(dga_filter.add(number, body.get("date") or "",
+                                      body.get("kind") or "manual",
+                                      body.get("note"), _editor()))
+    except ValueError as exc:
+        return jsonify({"error": "validation", "message": str(exc)}), 400
+
+
+@app.delete("/api/dga/filter-points")
+def dga_filter_point_remove():
+    asset = request.args.get("asset") or ""
+    try:
+        return jsonify(dga_filter.remove(asset, int(request.args.get("id") or 0)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "validation", "message": "'id' must be a stored point id."}), 400
+    except LookupError as exc:
+        return jsonify({"error": "not_found", "message": str(exc)}), 404
 
 
 @app.get("/api/dga/series/<path:number>")
@@ -727,7 +821,6 @@ def get_config():
         "aioIftoUncrossed": Config.AIO_IFTO_UNCROSSED,
         "saIrUsesIrField": Config.SA_IR_USES_IR_FIELD,
         "oltcUsesCebOltc": Config.OLTC_USES_CEB_OLTC,
-        "ecBandAscending": Config.EC_BAND_ASCENDING,
     }
     snapshot["assetTypeLabels"] = assets_mod.ASSET_TYPE_LABEL
     return jsonify(snapshot)

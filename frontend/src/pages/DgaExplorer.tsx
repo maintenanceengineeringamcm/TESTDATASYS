@@ -64,8 +64,8 @@ export default function DgaExplorer() {
       <SectionHeader
         accent="#0F6E8C"
         icon={Activity}
-        title="DGA Explorer"
-        subtitle="Browse dissolved-gas history, chart gas groups and rank the fleet by trend score"
+        title="Compare &amp; Rank"
+        subtitle="Chart several transformers on one gas chart and rank the fleet by DGA trend score"
       />
 
       <ScopeBanner label={data?.scope?.label} noun="assets with DGA"
