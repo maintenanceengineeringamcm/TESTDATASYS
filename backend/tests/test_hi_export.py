@@ -41,15 +41,17 @@ def test_workbook_layout(tmp_path, monkeypatch):
     head = [c.value for c in ws[5]]
     # criteria in engine order (AGE, FURAN, DGAL), then the DGA correction columns
     assert head[5:8] == ["Age", "Furanic Level / DP", "DGA Gas Levels"]
-    assert head[8:11] == ["HI before DGA correction", "DGA status", "Correction factor"]
+    assert head[8:15] == ["DGA status", "DGA status reason", "Correction factor",
+                          "HI without DGA correction", "Condition without correction",
+                          "HI with DGA correction", "Condition with correction"]
     row = {h: c.value for h, c in zip(head, ws[6])}
     assert row["Name"] == "TR 1" and row["Site"] == "G001 Ambalangoda GS"
     assert row["Furanic Level / DP"] == "no data" and row["Age"] == 0.5
-    assert row["Health Index"] == 21.0 and row["HI before DGA correction"] == 70.0
+    assert row["HI with DGA correction"] == 21.0 and row["HI without DGA correction"] == 70.0
     assert row["Correction factor"] == 0.7 and row["Criteria used"] == "2 / 3"
     assert "filter point of 2025-01-06" in row["DGA data window"]
     detail = wb["Criteria Detail"]
-    assert detail.cell(2, 1).value == "G001/PE/1/02/MT01_X/01" and detail.cell(5, 2).value == "Health Index"
+    assert detail.cell(2, 1).value == "G001/PE/1/02/MT01_X/01" and detail.cell(5, 2).value == "HI with DGA correction"
 
 
 def test_start_validation():

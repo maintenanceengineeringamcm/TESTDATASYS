@@ -12,7 +12,8 @@ The port follows `DGA_Status_Logic_C57104-2019.md` section by section:
 * section 2 - column selection (O2/N2 band, age band, Table 4 period band)
 * section 3 - deltas and the 3-6 point regression rate
 * section 4 - the four reference tables
-* section 5 - the Figure 2 decision, implemented literally
+* section 5 - the Figure 2 decision, except that Status 3 needs a level above
+  Table 2 AND a rate above Table 4 (either alone is Status 2)
 * section 6 - the confirmation-sampling and extreme-value refinements, layered
   on top as *flags*, so the classifier itself stays exactly Figure 2
 * section 7 - the output shape, including the `triggered_by` audit trail
@@ -464,17 +465,21 @@ def classify(samples: list[dict[str, Any]], age_years: float | None = None,
         e.latest is not None and e.t1 is not None and e.latest < e.t1 for e in measured)
     delta_tripped = any(e.exceedsT3 for e in measured)
     rate_tripped = any(e.exceedsT4 for e in measured)
+    level_t2_tripped = any(e.exceedsT2 for e in measured)
 
+    # Status 3 is stricter than Figure 2 as printed (engineering decision): it
+    # needs a gas above Table 2 AND a rate above Table 4. Either one on its own
+    # is Status 2, and so is a Table 2 exceedance with no multi-point rate.
     if all_levels_below_t1 and not delta_tripped and not (rates_available and rate_tripped):
         status = 1
         reason = ("Every measured gas is below its Table 1 (90th percentile) level, no "
                   "change exceeds Table 3, and no rate exceeds Table 4.")
-    elif any(e.exceedsT2 for e in measured) or (rates_available and rate_tripped):
+    elif level_t2_tripped and rates_available and rate_tripped:
         status = 3
-        reason = _status3_reason(measured, rates_available and rate_tripped)
+        reason = _status3_reason(measured, True)
     else:
         status = 2
-        reason = _status2_reason(measured, delta_tripped)
+        reason = _status2_reason(measured, delta_tripped, rates_available and rate_tripped)
 
     triggered_by = _triggers(measured, rates_available)
 
@@ -705,10 +710,19 @@ def _status3_reason(measured: list[GasEvidence], rate_tripped: bool) -> str:
     return "Status 3 on " + " and ".join(parts) + "."
 
 
-def _status2_reason(measured: list[GasEvidence], delta_tripped: bool) -> str:
-    over_t1 = [e.gas for e in measured if e.exceedsT1]
+def _status2_reason(measured: list[GasEvidence], delta_tripped: bool,
+                    rate_tripped: bool = False) -> str:
+    over_t1 = [e.gas for e in measured if e.exceedsT1 and not e.exceedsT2]
+    over_t2 = [e.gas for e in measured if e.exceedsT2]
     over_t3 = [e.gas for e in measured if e.exceedsT3]
+    over_t4 = [e.gas for e in measured if e.exceedsT4] if rate_tripped else []
     parts = []
+    if over_t2:
+        parts.append(f"{', '.join(over_t2)} above the Table 2 (95th percentile) level "
+                     "but no rate above Table 4")
+    if over_t4:
+        parts.append(f"{', '.join(over_t4)} rising faster than Table 4 allows but no "
+                     "level above Table 2")
     if over_t1:
         parts.append(f"{', '.join(over_t1)} above the Table 1 (90th percentile) level")
     on_limit = [e.gas for e in measured if e.atT1]
@@ -717,7 +731,9 @@ def _status2_reason(measured: list[GasEvidence], delta_tripped: bool) -> str:
                      "the standard counts as neither below nor above")
     if delta_tripped:
         parts.append(f"{', '.join(over_t3)} changing by more than Table 3 allows")
-    return "Not all quiet, but nothing above Table 2 either: " + " and ".join(parts) + "."
+    lead = ("Status 3 needs a level above Table 2 and a rate above Table 4 together: "
+            if over_t2 or over_t4 else "Not all quiet, but nothing above Table 2 either: ")
+    return lead + " and ".join(parts) + "."
 
 
 def _extreme_flags(measured: list[GasEvidence]) -> list[dict[str, Any]]:
@@ -816,6 +832,14 @@ def _trace(all_below_t1: bool, delta_tripped: bool, rate_tripped: bool,
          "answer": "Yes" if over_t2 else "No",
          "pass": not over_t2,
          "detail": f"{', '.join(over_t2)} above" if over_t2 else "none above"},
+        {"step": "Status 3 rule",
+         "question": "Is a level above Table 2 AND a rate above Table 4?",
+         "answer": "Yes" if status == 3 else "No",
+         "pass": status != 3,
+         "detail": ("both conditions met" if status == 3 else
+                    "level > Table 2 only - no rate above Table 4" if over_t2 else
+                    "rate > Table 4 only - no level above Table 2"
+                    if rates_available and rate_tripped else "neither condition met")},
         {"step": "Result", "question": "Outcome",
          "answer": STATUS_META[status]["label"], "pass": status == 1,
          "detail": STATUS_META[status]["verdict"]},

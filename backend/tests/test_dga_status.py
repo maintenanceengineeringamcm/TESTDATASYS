@@ -44,8 +44,22 @@ def classify_phase(phase: str):
 
 
 @pytest.mark.parametrize("phase", ["R", "Y", "B"])
-def test_all_three_phases_are_status_3(phase):
-    assert classify_phase(phase)["status"] == 3
+def test_all_three_phases_are_status_2_without_a_rate(phase):
+    """Above Table 2, but two samples give no Table 4 rate - the AND rule holds at 2."""
+    result = classify_phase(phase)
+    assert result["status"] == 2
+    assert "Table 2 and a rate above Table 4" in result["reason"]
+
+
+def test_level_above_table_2_and_rate_above_table_4_is_status_3():
+    """The AND rule: H2 past Table 2 and climbing faster than Table 4 allows."""
+    rows = [sample("2023-01-01", H2=20), sample("2023-07-01", H2=150),
+            sample("2024-01-01", H2=300)]
+    result = ds.classify(rows, age_years=20, asset="AND")
+    by_gas = {g["gas"]: g for g in result["gases"]}
+    assert by_gas["H2"]["exceedsT2"] and by_gas["H2"]["exceedsT4"]
+    assert result["status"] == 3
+    assert result["decisionTrace"][-2]["detail"] == "both conditions met"
 
 
 def test_columns_selected():
@@ -186,7 +200,7 @@ def test_unmeasured_gases_are_skipped_not_treated_as_zero():
     assert result["status"] == 1
 
 
-def test_rate_over_table_4_is_status_3_even_below_table_2():
+def test_rate_over_table_4_below_table_2_is_status_2():
     """Three samples over a year: CH4 climbs steadily but stays under Table 2."""
     rows = [sample("2023-01-01", CH4=2), sample("2023-07-01", CH4=14),
             sample("2024-01-01", CH4=26)]
@@ -196,7 +210,7 @@ def test_rate_over_table_4_is_status_3_even_below_table_2():
     by_gas = {g["gas"]: g for g in result["gases"]}
     assert by_gas["CH4"]["rate"] == pytest.approx(24.0, rel=0.05)   # ~24 ppm/yr vs limit 3
     assert by_gas["CH4"]["exceedsT2"] is False
-    assert result["status"] == 3
+    assert result["status"] == 2                       # rate alone no longer makes Status 3
 
 
 def test_delta_only_trip_below_table_1_asks_for_a_confirmation_sample():
@@ -212,17 +226,17 @@ def test_extreme_values_raise_the_expert_review_flag():
     """C2H6 at 1200 ppm is both 2x Table 2 and the standard's own example."""
     rows = [sample("2024-01-01", C2H6=1100), sample("2024-07-01", C2H6=1200)]
     result = ds.classify(rows, age_years=20, asset="X1")
-    assert result["status"] == 3
+    assert result["status"] == 2                       # level alone, no rate: AND rule
     assert len(result["extreme"]) >= 1
     assert any("ethane" in f["text"] for f in result["extreme"])
 
 
-def test_carbon_oxide_only_status_3_is_a_de_escalation_candidate():
-    """High CO2 with no gassing - downgradeable by an engineer, not by us."""
+def test_carbon_oxide_level_without_a_rate_is_status_2():
+    """High CO2 with no gassing no longer reaches Status 3, so nothing to de-escalate."""
     rows = [sample("2024-01-01", CO2=9000), sample("2024-07-01", CO2=9100)]
     result = ds.classify(rows, age_years=20, asset="CO2")
-    assert result["status"] == 3
-    assert result["deEscalationCandidate"] is True
+    assert result["status"] == 2
+    assert result["deEscalationCandidate"] is False
 
 
 def test_missing_table_3_limit_is_reported_not_guessed():

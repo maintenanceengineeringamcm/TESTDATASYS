@@ -219,8 +219,8 @@ def _dga_trend_component(asset: str,
 
 
 # DGA correction factor - the share of the final index taken away for each
-# IEEE C57.104-2019 status. Status 3 at 0.7 means the index drops by 70%.
-DGA_CORRECTION_DEFAULTS: dict[int, float] = {1: 0.0, 2: 0.3, 3: 0.7}
+# IEEE C57.104-2019 status. Status 3 at 0.3 means the index drops by 30%.
+DGA_CORRECTION_DEFAULTS: dict[int, float] = {1: 0.0, 2: 0.1, 3: 0.3}
 
 
 def parse_correction_factors(raw: dict[Any, Any] | None) -> dict[int, float]:
@@ -268,7 +268,8 @@ def _dga_correction(asset: str, a_type: str, hi: float | None, date_from: str,
     out: dict[str, Any] = {
         "enabled": True, "applied": False, "factors": {str(k): v for k, v in factors.items()},
         "status": None, "statusLabel": None, "verdict": None, "color": None, "bg": None,
-        "latestSample": None, "factor": 0.0, "hiBefore": hi, "hiAfter": hi, "message": "",
+        "latestSample": None, "reason": None, "factor": 0.0, "hiBefore": hi, "hiAfter": hi,
+        "message": "",
     }
     if a_type != "TR":
         out["message"] = "DGA correction applies to transformers only."
@@ -286,7 +287,7 @@ def _dga_correction(asset: str, a_type: str, hi: float | None, date_from: str,
         return out
     out.update(status=st.get("status"), statusLabel=st.get("statusLabel"),
                verdict=st.get("verdict"), color=st.get("color"), bg=st.get("bg"),
-               latestSample=st.get("latestSample"))
+               latestSample=st.get("latestSample"), reason=st.get("reason"))
     if st.get("status") is None:
         out["message"] = st.get("reason") or "No DGA sample to classify - index unchanged."
         return out

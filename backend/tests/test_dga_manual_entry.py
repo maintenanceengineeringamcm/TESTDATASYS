@@ -45,8 +45,8 @@ def entered(phase: str) -> dict:
 
 @pytest.mark.parametrize("phase", ["R", "Y", "B"])
 def test_entered_vector_matches_the_stored_vector(phase):
-    """Hand-entered figures reach the same Status 3 as the stored ones."""
-    assert entered(phase)["status"]["status"] == 3
+    """Hand-entered figures reach the same status as the stored ones (2: no rate)."""
+    assert entered(phase)["status"]["status"] == 2
 
 
 def test_entered_vector_selects_the_same_columns():
@@ -95,7 +95,7 @@ def test_numbers_may_arrive_as_strings():
                                 dict(date="2024-12-01", H2=125)], age_years=43)
     textual = ds.manual_report([dict(date="2024-06-01", H2="87"),
                                 dict(date="2024-12-01", H2="125")], age_years="43")
-    assert numeric["status"]["status"] == textual["status"]["status"] == 3
+    assert numeric["status"]["status"] == textual["status"]["status"] == 2
 
 
 # --------------------------------------------------------------------------
@@ -129,7 +129,7 @@ def test_two_samples_leave_table_4_unusable():
 
 def test_a_single_sample_classifies_on_levels_alone():
     result = ds.manual_report([dict(date="2024-01-01", H2=250)], age_years=20)["status"]
-    assert result["status"] == 3
+    assert result["status"] == 2                       # above Table 2, but no rate
     assert result["ratesAvailable"] is False
     assert gases(result)["H2"]["delta"] is None
 

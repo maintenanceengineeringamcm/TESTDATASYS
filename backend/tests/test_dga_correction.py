@@ -9,13 +9,13 @@ from core.hi_engine import (DGA_CORRECTION_DEFAULTS, apply_dga_correction,
 
 
 def test_defaults():
-    assert DGA_CORRECTION_DEFAULTS == {1: 0.0, 2: 0.3, 3: 0.7}
+    assert DGA_CORRECTION_DEFAULTS == {1: 0.0, 2: 0.1, 3: 0.3}
     assert parse_correction_factors(None) == DGA_CORRECTION_DEFAULTS
     assert parse_correction_factors({}) == DGA_CORRECTION_DEFAULTS
 
 
 def test_partial_override_keeps_other_defaults():
-    assert parse_correction_factors({"3": 0.5}) == {1: 0.0, 2: 0.3, 3: 0.5}
+    assert parse_correction_factors({"3": 0.5}) == {1: 0.0, 2: 0.1, 3: 0.5}
     assert parse_correction_factors({"2": ""}) == DGA_CORRECTION_DEFAULTS
 
 
@@ -27,8 +27,8 @@ def test_rejects_bad_factors(raw):
 
 @pytest.mark.parametrize("status, expected, factor", [
     (1, 80.0, 0.0),
-    (2, 56.0, 0.3),      # 80 x (1 - 0.3)
-    (3, 24.0, 0.7),      # 80 x (1 - 0.7): status 3 takes 70% off
+    (2, 72.0, 0.1),      # 80 x (1 - 0.1)
+    (3, 56.0, 0.3),      # 80 x (1 - 0.3): status 3 takes 30% off
     (None, 80.0, 0.0),   # no DGA status - index unchanged
 ])
 def test_apply(status, expected, factor):
@@ -51,8 +51,8 @@ def test_status_drives_correction(monkeypatch):
         "color": "#D64545", "bg": "#FCEAEA", "latestSample": "2026-01-14"})
     out = hi_engine._dga_correction("X", "TR", 80.0, "1900-01-01", "2999-12-31",
                                     DGA_CORRECTION_DEFAULTS)
-    assert out["applied"] and out["factor"] == 0.7
-    assert out["hiBefore"] == 80.0 and out["hiAfter"] == 24.0
+    assert out["applied"] and out["factor"] == 0.3
+    assert out["hiBefore"] == 80.0 and out["hiAfter"] == 56.0
 
 
 def test_unclassified_dga_leaves_index(monkeypatch):

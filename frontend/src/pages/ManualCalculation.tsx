@@ -14,8 +14,8 @@ import { api } from '../api'
 import { ConfigWarning, ErrorNote, HIBadge, Loader, SectionHeader } from '../components/ui'
 import type { HIComponent, HIDetail } from '../types'
 
-/** Share of the final index removed per IEEE C57.104 DGA status (0.7 = -70%). */
-const DGA_FACTOR_DEFAULTS: Record<string, string> = { '1': '0', '2': '0.3', '3': '0.7' }
+/** Share of the final index removed per IEEE C57.104 DGA status (0.3 = -30%). */
+const DGA_FACTOR_DEFAULTS: Record<string, string> = { '1': '0', '2': '0.1', '3': '0.3' }
 
 interface Correction {
   on: boolean
@@ -423,8 +423,8 @@ export default function ManualCalculation() {
 
               <p className="mt-3 text-[11px] leading-relaxed text-ink-muted">
                 Final HI = calculated HI × (1 − factor), using the transformer&apos;s IEEE
-                C57.104-2019 DGA status. Defaults: Status 1 no correction, Status 2 0.3,
-                Status 3 0.7 (index reduced by 70%). A transformer with no classifiable
+                C57.104-2019 DGA status. Defaults: Status 1 no correction, Status 2 0.1,
+                Status 3 0.3 (index reduced by 30%). A transformer with no classifiable
                 DGA keeps its index. Press Calculate to apply.
                 {dga && (
                   <span className="mt-1 block font-semibold text-ink-soft">

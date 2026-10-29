@@ -290,8 +290,10 @@ def build_workbook(path: Path, job: dict[str, Any], results: list[dict[str, Any]
 
     cols = ["No", "Asset Number", "Name", "Site", "Type"] + [f"{labels[c]}" for c in criteria]
     if dga_on:
-        cols += ["HI before DGA correction", "DGA status", "Correction factor"]
-    cols += ["Health Index", "Condition", "Criteria used", "No data for", "DGA data window", "Note"]
+        cols += ["DGA status", "DGA status reason", "Correction factor",
+                 "HI without DGA correction", "Condition without correction"]
+    cols += ["HI with DGA correction" if dga_on else "Health Index",
+             "Condition with correction" if dga_on else "Condition", "Criteria used", "No data for", "DGA data window", "Note"]
     H = 5
     header(ws, H, cols)
     for i, r in enumerate(results, 1):
@@ -313,10 +315,15 @@ def build_workbook(path: Path, job: dict[str, Any], results: list[dict[str, Any]
             k += 1
         corr = r.get("dgaCorrection") or {}
         if dga_on:
-            put(ws, row, k, r.get("healthIndexUncorrected"), "0.00")
-            put(ws, row, k + 1, corr.get("statusLabel") or "not classified", left=True)
+            raw_band = scoring.hi_band(r.get("healthIndexUncorrected")) or {}
+            put(ws, row, k, corr.get("statusLabel") or "not classified", left=True,
+                color=(corr.get("color") or "#000000").lstrip("#"), bold=bool(corr.get("status")))
+            put(ws, row, k + 1, corr.get("reason") or corr.get("message") or "", left=True)
             put(ws, row, k + 2, corr.get("factor") if corr.get("applied") else None, "0.00")
-            k += 3
+            put(ws, row, k + 3, r.get("healthIndexUncorrected"), "0.00")
+            put(ws, row, k + 4, raw_band.get("label") or "",
+                color=(raw_band.get("color") or "#000000").lstrip("#"))
+            k += 5
         band = r.get("band") or {}
         put(ws, row, k, r.get("healthIndex"), "0.00", bold=True)
         put(ws, row, k + 1, band.get("label") or "", bold=True,
@@ -332,7 +339,7 @@ def build_workbook(path: Path, job: dict[str, Any], results: list[dict[str, Any]
         if corr.get("message") and dga_on:
             note = f"{note} {corr['message']}".strip()
         put(ws, row, k + 5, note, left=True)
-    widths = [5, 27, 32, 22, 22] + [11] * len(criteria) + ([12, 14, 11] if dga_on else []) \
+    widths = [5, 27, 32, 22, 22] + [11] * len(criteria) + ([12, 60, 11, 13, 14] if dga_on else []) \
         + [11, 12, 10, 36, 46, 36]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[col(i)].width = w
@@ -366,7 +373,8 @@ def build_workbook(path: Path, job: dict[str, Any], results: list[dict[str, Any]
         for column in range(1, 11):
             put(wd, row, column, None, fill=band_fill)
         put(wd, row, 1, r.get("asset"), left=True, bold=True, fill=band_fill)
-        put(wd, row, 2, "Health Index", left=True, bold=True, fill=band_fill)
+        put(wd, row, 2, "HI with DGA correction" if dga_on else "Health Index", left=True,
+            bold=True, fill=band_fill)
         put(wd, row, 8, r.get("healthIndex"), "0.00", bold=True, fill=band_fill)
         put(wd, row, 9, (r.get("band") or {}).get("label") or "", left=True, bold=True, fill=band_fill)
         if dga_on and (r.get("dgaCorrection") or {}).get("applied"):
@@ -392,7 +400,12 @@ def build_workbook(path: Path, job: dict[str, Any], results: list[dict[str, Any]
                     "w / Σw(available) × Σw(all)."),
         ("DGA correction factor", "OFF" if f is None else
          "ON – final HI × (1 − factor) by IEEE C57.104-2019 status: " +
-         ", ".join(f"Status {k} = {v:g}" for k, v in sorted(f.items()))),
+         ", ".join(f"Status {k} = {v:g}" for k, v in sorted(f.items())) +
+         ". The HI Summary shows the index both without and with the correction."),
+        ("DGA status rule", "Status 3 only when a gas level is above Table 2 AND a multi-point "
+                            "rate is above Table 4; either one alone (or a Table 2 exceedance "
+                            "with no rate available) is Status 2. Status 1 = every level below "
+                            "Table 1, no change above Table 3, no rate above Table 4."),
         ("Oil-filtration rule", "OFF" if not Config.DGA_FILTER_WINDOW else
          f"ON – DGA level and trend use the samples after the last filter point when there are at "
          f"least {Config.DGA_MIN_SAMPLES_AFTER_FILTER}; otherwise the data before it (repeated for "

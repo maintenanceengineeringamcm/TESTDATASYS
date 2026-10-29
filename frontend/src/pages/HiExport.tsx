@@ -56,7 +56,7 @@ export default function HiExport() {
   const [query, setQuery] = useState('')
   const [criteria, setCriteria] = useState<Set<string> | null>(null) // null = all
   const [dgaOn, setDgaOn] = useState(false)
-  const [factors, setFactors] = useState<Record<string, string>>({ '1': '0', '2': '0.3', '3': '0.7' })
+  const [factors, setFactors] = useState<Record<string, string>>({ '1': '0', '2': '0.1', '3': '0.3' })
 
   const [job, setJob] = useState<ExportJob | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -282,7 +282,7 @@ export default function HiExport() {
                   ))}
                 </div>
                 <p className="mt-2 text-[11px] leading-relaxed text-ink-muted">
-                  Final HI × (1 − factor) by the IEEE C57.104-2019 DGA status. 0.7 = reduce by 70 %.
+                  Final HI × (1 − factor) by the IEEE C57.104-2019 DGA status. 0.3 = reduce by 30 %.
                 </p>
               </>
             ) : (
